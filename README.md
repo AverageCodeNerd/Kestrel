@@ -24,7 +24,11 @@ Download `kestrel-<version>.iso` from
 [Releases](https://github.com/AverageCodeNerd/Kestrel/releases) and boot it in
 any VM set to **UEFI firmware with Secure Boot off**. That is the only
 requirement. Check it against `SHA256SUMS` if you like — a truncated download
-looks exactly like a kernel that fails to boot. `kestrel.vhd` is the same
+looks exactly like a kernel that fails to boot.
+
+The build is **reproducible**: cloning this repository and running
+`.\release.ps1` produces images whose SHA-256 hashes match the published ones
+exactly, so you never have to take a binary on trust. `kestrel.vhd` is the same
 system as a hard disk image, which is the better choice if you want files to
 survive a reboot — booted from the ISO there is no writable disk, so `/disk`
 is absent.
