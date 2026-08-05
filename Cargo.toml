@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["kernel", "xtask", "user/hello", "user/fault", "user/selfmod", "logo"]
+default-members = ["xtask"]
+
+
+

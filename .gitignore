@@ -1,0 +1,14 @@
+/target
+/build
+
+# Staged release artifacts. Images are tens of megabytes and are rebuilt by
+# release.ps1, so they belong on a GitHub release rather than in the history.
+/release
+
+# Images staged for the VirtualBox VMs, plus the logs and captures they leave
+# behind. Only the refresh script itself belongs in the repository.
+/dist/*.vhd
+/dist/*.iso
+/dist/*.img
+/dist/*.png
+/dist/*.log

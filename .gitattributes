@@ -1,0 +1,17 @@
+# Normalise text to LF in the repository regardless of the checkout platform,
+# and name the binaries explicitly. Git guesses well, but a mangled bootloader
+# is a silent, confusing failure: the image builds and simply will not boot.
+* text=auto eol=lf
+
+*.png  binary
+*.EFI  binary
+*.efi  binary
+*.bin  binary
+*.sys  binary
+*.iso  binary
+*.vhd  binary
+*.img  binary
+
+# PowerShell is only ever run on Windows here, and some older hosts are
+# unhappy with LF-only scripts.
+*.ps1  text eol=crlf

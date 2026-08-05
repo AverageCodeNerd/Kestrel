@@ -1,0 +1,13 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# Applies only when building for the bare-metal target, so the host-side
+# `xtask` helper still builds normally.
+[target.x86_64-unknown-none]
+rustflags = [
+    # The kernel is linked at a fixed higher-half address, not relocated.
+    "-C", "relocation-model=static",
+    # Everything lives in the top 2 GiB, which lets the compiler use
+    # sign-extended 32-bit relocations instead of 64-bit ones.
+    "-C", "code-model=kernel",
+]
