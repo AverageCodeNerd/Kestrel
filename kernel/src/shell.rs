@@ -23,6 +23,13 @@ pub struct Shell {
     drawn: usize,
     /// Set while the shell is running inside the desktop's terminal window.
     in_desktop: bool,
+    /// The terminal window's contents, while the desktop is up.
+    ///
+    /// Held here rather than as a local of `desktop` because waiting on a
+    /// program has to keep drawing: the desktop loop and the shell are one
+    /// task, so a blocking wait inside `on_key` would otherwise freeze the
+    /// screen until the program exited.
+    terminal: Option<terminal::Terminal>,
 }
 
 impl Shell {
@@ -36,6 +43,7 @@ impl Shell {
             stashed: String::new(),
             drawn: 0,
             in_desktop: false,
+            terminal: None,
         }
     }
 
@@ -456,7 +464,7 @@ impl Shell {
         );
     }
 
-    fn exec(&self, args: &[&str]) {
+    fn exec(&mut self, args: &[&str]) {
         let Some(name) = args.first() else {
             println!("usage: exec <file>   (try /bin/hello)");
             return;
@@ -493,7 +501,7 @@ impl Shell {
     ///
     /// A background form would need job control to hand the input back and
     /// forth; a foreground-only shell needs only this.
-    fn wait_for(&self, id: u64) {
+    fn wait_for(&mut self, id: u64) {
         loop {
             let outcome = x86_64::instructions::interrupts::without_interrupts(|| {
                 task::SCHEDULER.lock().outcome(id)
@@ -508,11 +516,65 @@ impl Shell {
                 return;
             }
 
+            // Keep the desktop drawing. Without this a program run from the
+            // terminal window would freeze the whole screen until it exited,
+            // because the compositor is driven by this very task.
+            self.pump_desktop();
+
             // Collect anything that has already finished, so a program that
             // spawns nothing still lets the reaper run.
             task::reap();
             task::yield_now();
             x86_64::instructions::hlt();
+        }
+    }
+
+    /// One pass of the desktop: service the launcher, drain output into the
+    /// terminal window, sample the mouse, and repaint.
+    ///
+    /// Does nothing on the console, so callers do not have to check.
+    fn pump_desktop(&mut self) {
+        if !self.in_desktop {
+            return;
+        }
+
+        // Drained outside the lock: a command printing while this task held
+        // the DESKTOP lock would deadlock against the compositor.
+        let output = terminal::drain();
+        let notice = crate::desktop::with(|d| d.take_notice()).flatten();
+
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+
+        crate::desktop::with(|desktop| {
+            if let Some(kind) = desktop.take_open_request() {
+                let (width, height) = desktop.size();
+                desktop.open(build_window(kind, width, height));
+            }
+
+            if let Some(bytes) = output {
+                terminal.write(&bytes);
+                // By role, not by index: closing a window shifts every index
+                // after it, and the terminal is not always first.
+                if let Some(index) = desktop.find(crate::desktop::Kind::Terminal) {
+                    let rows = desktop.windows[index].rows();
+                    desktop.windows[index].lines = terminal.visible(rows);
+                    desktop.invalidate_window(index);
+                }
+            }
+
+            // Sample the mouse several times per frame. A full redraw takes
+            // long enough that polling once per frame misses short clicks and
+            // makes dragging feel like it is snapping.
+            for _ in 0..8 {
+                desktop.handle_mouse();
+            }
+            desktop.render();
+        });
+
+        if let Some(message) = notice {
+            println!("{message}");
         }
     }
 
@@ -577,7 +639,7 @@ impl Shell {
 
         // From here on, everything the shell prints is staged for the terminal
         // window instead of the framebuffer console.
-        let mut terminal = terminal::Terminal::new(terminal_rows.max(1) + 200);
+        self.terminal = Some(terminal::Terminal::new(terminal_rows.max(1) + 200));
         terminal::start_capture();
         self.in_desktop = true;
 
@@ -612,47 +674,15 @@ impl Shell {
             task::reap();
             crate::net::poll();
 
-            // Drain outside the lock too, for the same reason.
-            let output = terminal::drain();
-
-            // Anything the Settings window wanted to say. Printed here rather
-            // than from inside the compositor, which runs holding the lock.
-            if let Some(message) = crate::desktop::with(|d| d.take_notice()).flatten() {
-                println!("{message}");
-            }
-
-            // Sample the mouse several times per frame. A full redraw takes
-            // long enough that polling once per frame misses short clicks and
-            // makes dragging feel like it is snapping.
-            crate::desktop::with(|desktop| {
-                // Serve anything the launcher asked to open. The compositor
-                // knows what was clicked; only the shell knows how to build it.
-                if let Some(kind) = desktop.take_open_request() {
-                    let window = build_window(kind, width, height);
-                    desktop.open(window);
-                }
-
-                if let Some(bytes) = output {
-                    terminal.write(&bytes);
-                    // By role, not by index: closing a window shifts every
-                    // index after it, and the terminal is not always first.
-                    if let Some(index) = desktop.find(crate::desktop::Kind::Terminal) {
-                        let rows = desktop.windows[index].rows();
-                        desktop.windows[index].lines = terminal.visible(rows);
-                        desktop.invalidate_window(index);
-                    }
-                }
-
-                for _ in 0..8 {
-                    desktop.handle_mouse();
-                }
-                desktop.render();
-            });
+            // The same pass a waiting `exec` runs, so the screen behaves
+            // identically whether or not a program is in the foreground.
+            self.pump_desktop();
 
             task::yield_now();
         }
 
         self.in_desktop = false;
+        self.terminal = None;
         terminal::stop_capture();
         *crate::desktop::DESKTOP.lock() = None;
 

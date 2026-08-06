@@ -23,6 +23,11 @@ pub const SYS_LOAD: u64 = 6;
 pub const SYS_STORE: u64 = 7;
 /// sleep(milliseconds).
 pub const SYS_SLEEP: u64 = 8;
+/// poll() -> 1 if a keystroke is waiting. Lets a program stay responsive
+/// without blocking, which is what anything animated needs.
+pub const SYS_POLL: u64 = 9;
+/// clear() — wipe the screen and return to the top.
+pub const SYS_CLEAR: u64 = 10;
 
 /// The longest path a program may pass in. Enough for anything the FAT32
 /// driver can represent, and small enough to copy onto the kernel stack.
@@ -135,6 +140,11 @@ extern "C" fn dispatch(number: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
         SYS_LOAD => sys_load(a, b, c, d),
         SYS_STORE => sys_store(a, b, c, d),
         SYS_SLEEP => sys_sleep(a),
+        SYS_POLL => u64::from(crate::keyboard::ready() || crate::serial::ready()),
+        SYS_CLEAR => {
+            crate::print::clear();
+            0
+        }
         // Terminates the calling task rather than returning to ring 3. The
         // task's stacks and address space stay allocated until something
         // reaps it; nothing does yet.

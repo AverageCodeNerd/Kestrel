@@ -165,7 +165,7 @@ fn build_kernel(opts: &Options) {
 }
 
 /// User programs shipped as bootloader modules.
-const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit"];
+const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit", "snake"];
 
 /// Build the userspace programs.
 ///
@@ -651,6 +651,7 @@ fn wait_until_written(path: &Path) -> std::io::Result<()> {
         "screendump never completed",
     ))
 }
+
 
 
 

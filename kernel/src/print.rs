@@ -81,6 +81,15 @@ pub fn logo(size: usize) {
 
 pub fn clear() {
     x86_64::instructions::interrupts::without_interrupts(|| {
+        // With a terminal window open the console is not what anyone is
+        // looking at, so clearing it would appear to do nothing. A form feed
+        // carries the instruction along the same byte stream as the text, so
+        // it arrives in order with it rather than racing ahead.
+        if terminal::capturing() {
+            terminal::push(&[0x0C]);
+            return;
+        }
+
         if let Some(console) = CONSOLE.lock().as_mut() {
             console.clear();
         }

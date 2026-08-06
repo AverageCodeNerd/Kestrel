@@ -20,6 +20,8 @@ pub const SYS_READ: u64 = 5;
 pub const SYS_LOAD: u64 = 6;
 pub const SYS_STORE: u64 = 7;
 pub const SYS_SLEEP: u64 = 8;
+pub const SYS_POLL: u64 = 9;
+pub const SYS_CLEAR: u64 = 10;
 
 /// Every call returns this on failure. It is `-1` read as unsigned, which is
 /// how the kernel reports an error without a second return value.
@@ -178,6 +180,21 @@ pub fn store(path: &str, data: &[u8]) -> u64 {
 }
 
 // ------------------------------------------------------------------ misc ---
+
+/// Is a keystroke waiting? Lets a program keep moving instead of blocking.
+pub fn key_ready() -> bool {
+    unsafe { syscall(SYS_POLL, 0, 0, 0, 0) == 1 }
+}
+
+/// Take a keystroke only if one is waiting.
+pub fn read_key() -> Option<u8> {
+    if key_ready() { read_byte() } else { None }
+}
+
+/// Wipe the screen and start again at the top.
+pub fn clear() {
+    unsafe { syscall(SYS_CLEAR, 0, 0, 0, 0) };
+}
 
 pub fn getpid() -> u64 {
     unsafe { syscall(SYS_GETPID, 0, 0, 0, 0) }

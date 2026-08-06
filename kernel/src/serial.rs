@@ -89,6 +89,15 @@ enum Escape {
 
 static ESCAPE: Mutex<Escape> = Mutex::new(Escape::None);
 
+/// Whether a byte is waiting at the port.
+///
+/// Approximate on purpose: a byte that turns out to be part of an escape
+/// sequence reports as ready and then yields nothing. The caller is polling in
+/// a loop anyway, so an occasional empty read costs it nothing.
+pub fn ready() -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| SERIAL.lock().has_received())
+}
+
 /// Read one keypress from the serial console, if any is waiting.
 ///
 /// This is the only usable input on machines with no PS/2 controller — notably

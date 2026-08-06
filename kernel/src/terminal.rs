@@ -101,6 +101,13 @@ impl Terminal {
                 // Return to column zero without clearing: the line editor
                 // relies on overwriting what is already there.
                 b'\r' => self.cursor = 0,
+                // Form feed: start again with an empty screen. Sent by the
+                // `clear` system call, so a full-screen program can redraw.
+                0x0C => {
+                    self.lines.clear();
+                    self.lines.push(String::new());
+                    self.cursor = 0;
+                }
                 0x08 => self.cursor = self.cursor.saturating_sub(1),
                 byte if byte.is_ascii_graphic() || byte == b' ' => {
                     let column = self.cursor;

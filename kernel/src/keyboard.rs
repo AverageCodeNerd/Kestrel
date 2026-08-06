@@ -221,6 +221,10 @@ impl Buffer {
         self.write = next;
     }
 
+    fn is_empty(&self) -> bool {
+        self.read == self.write
+    }
+
     fn pop(&mut self) -> Option<u8> {
         if self.read == self.write {
             return None;
@@ -327,4 +331,12 @@ pub fn handle_interrupt() {
 /// lock forever and wedge the machine.
 pub fn read() -> Option<u8> {
     x86_64::instructions::interrupts::without_interrupts(|| BUFFER.lock().pop())
+}
+
+/// Whether `read` would return something, without taking it.
+///
+/// Needed by anything that must keep moving while it waits — a game cannot
+/// block on a keystroke between frames.
+pub fn ready() -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| !BUFFER.lock().is_empty())
 }
