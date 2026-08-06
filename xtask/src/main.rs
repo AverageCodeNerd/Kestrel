@@ -164,7 +164,40 @@ fn build_kernel(opts: &Options) {
     }
 }
 
-/// User programs shipped as bootloader modules.
+/// Everything the boot media offers to install.
+///
+/// These are *not* installed. They ride along as bootloader modules so the
+/// repository exists on any medium the kernel can boot from, including a CD it
+/// cannot write to, and the Software app copies from there to wherever
+/// installed programs live.
+struct Package {
+    name: &'static str,
+    summary: &'static str,
+}
+
+const PACKAGES: &[Package] = &[
+    Package {
+        name: "edit",
+        summary: "A line editor for text files",
+    },
+    Package {
+        name: "snake",
+        summary: "The game. Steer with wasd",
+    },
+    Package {
+        name: "hello",
+        summary: "Prints a greeting from ring 3",
+    },
+    Package {
+        name: "fault",
+        summary: "Demo: reads kernel memory and is killed for it",
+    },
+    Package {
+        name: "selfmod",
+        summary: "Demo: rewrites its own code and is killed by W^X",
+    },
+];
+
 const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit", "snake"];
 
 /// Build the userspace programs.
@@ -219,22 +252,33 @@ fn assemble_esp(opts: &Options) -> PathBuf {
     }
     std::fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
     std::fs::create_dir_all(esp.join("boot")).unwrap();
-    std::fs::create_dir_all(esp.join("bin")).unwrap();
+    std::fs::create_dir_all(esp.join("repo")).unwrap();
 
     copy(&root.join("limine/BOOTX64.EFI"), &esp.join("EFI/BOOT/BOOTX64.EFI"));
     copy(&root.join("limine.conf"), &esp.join("EFI/BOOT/limine.conf"));
     copy(&kernel, &esp.join("boot/kestrel"));
 
-    // User programs, which Limine loads as modules and the kernel exposes
-    // under /bin.
-    for program in USER_PROGRAMS {
+    // The repository. Limine loads these as modules and the kernel exposes
+    // them under /repo, from which the Software app installs. Nothing here is
+    // installed by shipping it.
+    for package in PACKAGES {
         let binary = root
             .join("target")
             .join(TARGET)
             .join(profile_dir(opts))
-            .join(program);
-        copy(&binary, &esp.join("bin").join(program));
+            .join(package.name);
+        copy(&binary, &esp.join("repo").join(package.name));
     }
+
+    // The catalogue: what each package is, in a form the kernel can read
+    // without a parser worth the name. Generated rather than hand-written, so
+    // a package cannot be shipped without a description or described without
+    // being shipped.
+    let catalogue: String = PACKAGES
+        .iter()
+        .map(|package| format!("{}|{}\n", package.name, package.summary))
+        .collect();
+    std::fs::write(esp.join("repo/catalogue"), catalogue).expect("could not write the catalogue");
 
     esp
 }

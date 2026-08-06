@@ -27,6 +27,13 @@ pub enum Action {
     NextWallpaper,
     Save,
     Reset,
+    /// Install or remove the catalogue entry at this position.
+    ///
+    /// An index rather than a name so the action stays `Copy`, and safe to use
+    /// because both the layout and this act on the same catalogue in the same
+    /// order.
+    Install(usize),
+    Remove(usize),
 }
 
 /// How an item is drawn.
@@ -334,5 +341,127 @@ pub fn apply(action: Action) -> Option<String> {
             theme::replace(Theme::default());
             None
         }
+
+        Action::Install(index) => {
+            let packages = crate::store::catalogue();
+            let package = packages.get(index)?;
+            Some(match crate::store::install(&package.name) {
+                Ok(size) => {
+                    if crate::store::persistent() {
+                        format!("installed {} ({size} bytes)", package.name)
+                    } else {
+                        format!(
+                            "installed {} ({size} bytes) - no writable disk, so until reboot",
+                            package.name
+                        )
+                    }
+                }
+                Err(e) => format!("store: {e}"),
+            })
+        }
+
+        Action::Remove(index) => {
+            let packages = crate::store::catalogue();
+            let package = packages.get(index)?;
+            Some(match crate::store::remove(&package.name) {
+                Ok(()) => format!("removed {}", package.name),
+                Err(e) => format!("store: {e}"),
+            })
+        }
     }
+}
+
+/// The Software window's contents.
+///
+/// One row per package: its name, what it is, its size, and a button that
+/// either installs it or takes it off again. Built from the same catalogue the
+/// `store` command reads, so the two cannot disagree about what exists.
+pub fn software_layout(
+    x: isize,
+    y: isize,
+    width: usize,
+    cell_w: usize,
+    cell_h: usize,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+    let row_height = cell_h + 10;
+    let step = (row_height + 8) as isize;
+
+    let interior = width.saturating_sub(16);
+    let left = x + 8;
+    let right = left + interior as isize;
+    let mut cursor = y + 6;
+
+    let packages = crate::store::catalogue();
+
+    if packages.is_empty() {
+        items.push(Item {
+            x: left,
+            y: cursor,
+            width: interior,
+            height: cell_h,
+            label: "Nothing available on this medium".to_string(),
+            style: Style::Label,
+            action: None,
+        });
+        return items;
+    }
+
+    items.push(Item {
+        x: left,
+        y: cursor,
+        width: interior,
+        height: cell_h,
+        label: if crate::store::persistent() {
+            format!("Installing to {}", crate::store::install_root())
+        } else {
+            "No writable disk - installs last until reboot".to_string()
+        },
+        style: Style::Heading,
+        action: None,
+    });
+    cursor += cell_h as isize + 10;
+
+    let button_width = 9 * cell_w;
+
+    for (index, package) in packages.iter().enumerate() {
+        // Name on the first line, description under it, button to the right.
+        items.push(Item {
+            x: left,
+            y: cursor,
+            width: interior.saturating_sub(button_width + 10),
+            height: cell_h,
+            label: package.name.clone(),
+            style: Style::Label,
+            action: None,
+        });
+
+        items.push(Item {
+            x: left,
+            y: cursor + cell_h as isize,
+            width: interior.saturating_sub(button_width + 10),
+            height: cell_h,
+            label: package.summary.clone(),
+            style: Style::Heading,
+            action: None,
+        });
+
+        items.push(Item {
+            x: right - button_width as isize,
+            y: cursor,
+            width: button_width,
+            height: row_height,
+            label: if package.installed { "remove" } else { "install" }.to_string(),
+            style: if package.installed { Style::Active } else { Style::Button },
+            action: Some(if package.installed {
+                Action::Remove(index)
+            } else {
+                Action::Install(index)
+            }),
+        });
+
+        cursor += step + cell_h as isize;
+    }
+
+    items
 }

@@ -36,6 +36,7 @@ mod serial;
 mod settings;
 mod shell;
 mod smp;
+mod store;
 mod syscall;
 mod task;
 mod terminal;
@@ -199,23 +200,28 @@ fn load_modules() {
         return;
     }
 
-    vfs::with(|fs| fs.mkdir("/bin").ok());
+    vfs::with(|fs| fs.mkdir(store::REPOSITORY).ok());
 
+    let mut count = 0usize;
     for module in modules {
         // Use the basename of the path Limine reports.
         let path = module.path();
         let name = path.rsplit('/').next().unwrap_or(path);
-        let target = alloc::format!("/bin/{name}");
+        let target = alloc::format!("{}/{name}", store::REPOSITORY);
 
         match vfs::with(|fs| fs.write(&target, module.data())) {
-            Some(Ok(())) => println!(
-                "module       : {target} ({} bytes)",
-                module.data().len()
-            ),
-            Some(Err(e)) => println!("module       : {target} failed - {}", e.as_str()),
+            Some(Ok(())) => count += 1,
+            Some(Err(e)) => println!("repo         : {target} failed - {}", e.as_str()),
             None => {}
         }
     }
+
+    // These are offered, not installed: the catalogue is one of them, so it is
+    // not itself a package.
+    println!(
+        "repo         : {} packages available ('store' to see them)",
+        count.saturating_sub(1)
+    );
 }
 
 /// Bring up the network card and announce ourselves.
@@ -521,5 +527,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     halt()
 }
+
 
 

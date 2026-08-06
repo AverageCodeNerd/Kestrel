@@ -1,4 +1,4 @@
-//! A minimal ISO 9660 image with an El Torito EFI boot entry.
+﻿//! A minimal ISO 9660 image with an El Torito EFI boot entry.
 //!
 //! Two filesystems are involved, which is easy to get wrong:
 //!
@@ -11,7 +11,7 @@
 //! the El Torito boot handle to a volume and falls back to scanning, so the
 //! config and kernel must be reachable through ISO 9660 as well.
 //!
-//! ISO 9660 filenames are 8.3, uppercase, and version-suffixed — `LIMINE.CON;1`
+//! ISO 9660 filenames are 8.3, uppercase, and version-suffixed â€” `LIMINE.CON;1`
 //! rather than `limine.conf`. Rock Ridge `NM` entries in each record's
 //! system-use area carry the real name, which Limine's driver reads.
 
@@ -32,7 +32,7 @@ const PATH_TABLE_L_LBA: u32 = 20;
 const PATH_TABLE_M_LBA: u32 = 21;
 const ROOT_DIRECTORY_LBA: u32 = 22;
 const BOOT_DIRECTORY_LBA: u32 = 23;
-const BIN_DIRECTORY_LBA: u32 = 24;
+const REPO_DIRECTORY_LBA: u32 = 24;
 /// File extents begin here; the boot image follows them.
 const FIRST_FILE_LBA: u32 = 25;
 
@@ -59,12 +59,12 @@ pub fn build(esp_dir: &Path, iso: &Path) -> io::Result<u64> {
 
     // Everything Limine has to find through ISO 9660: its config, the kernel,
     // and every user program it is asked to load as a module. Leaving the
-    // modules out here would boot but leave /bin empty.
+    // modules out here would boot but leave /repo empty.
     let config = std::fs::read(esp_dir.join("EFI/BOOT/limine.conf"))?;
     let kernel = std::fs::read(esp_dir.join("boot/kestrel"))?;
 
     let mut programs: Vec<(String, Vec<u8>)> = Vec::new();
-    let bin = esp_dir.join("bin");
+    let bin = esp_dir.join("repo");
     if bin.is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(&bin)?.collect::<Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
@@ -113,7 +113,7 @@ pub fn build(esp_dir: &Path, iso: &Path) -> io::Result<u64> {
         offset += put(
             sector,
             offset,
-            &record(BIN_DIRECTORY_LBA, ISO_SECTOR as u32, FLAG_DIRECTORY, Name::Named("BIN", "bin")),
+            &record(REPO_DIRECTORY_LBA, ISO_SECTOR as u32, FLAG_DIRECTORY, Name::Named("REPO", "repo")),
         );
         put(
             sector,
@@ -135,10 +135,10 @@ pub fn build(esp_dir: &Path, iso: &Path) -> io::Result<u64> {
         );
     }
 
-    // /bin: `.`, `..`, and every user program.
+    // /repo: `.`, `..`, and every package.
     {
         let mut entries: Vec<u8> = Vec::new();
-        entries.extend_from_slice(&record(BIN_DIRECTORY_LBA, ISO_SECTOR as u32, FLAG_DIRECTORY, Name::Dot));
+        entries.extend_from_slice(&record(REPO_DIRECTORY_LBA, ISO_SECTOR as u32, FLAG_DIRECTORY, Name::Dot));
         entries.extend_from_slice(&record(ROOT_DIRECTORY_LBA, ISO_SECTOR as u32, FLAG_DIRECTORY, Name::DotDot));
 
         for (index, (name, data)) in programs.iter().enumerate() {
@@ -158,7 +158,7 @@ pub fn build(esp_dir: &Path, iso: &Path) -> io::Result<u64> {
             entries.len() <= ISO_SECTOR,
             "too many programs for a one-sector directory"
         );
-        let sector = sector_mut(&mut image, BIN_DIRECTORY_LBA);
+        let sector = sector_mut(&mut image, REPO_DIRECTORY_LBA);
         sector[..entries.len()].copy_from_slice(&entries);
     }
 
@@ -199,7 +199,7 @@ const PARTITION_GUID: [u8; 16] = *b"KestrelIsoEsp001";
 /// Expose the embedded El Torito boot image as an EFI system partition.
 ///
 /// Without this the ISO boots, but Limine stops with "Could not meaningfully
-/// match the boot device handle with a volume... Press any key" — on some
+/// match the boot device handle with a volume... Press any key" â€” on some
 /// firmware, VirtualBox's included, the El Torito boot handle cannot be
 /// correlated with any volume Limine knows about, and it waits for a keypress
 /// before falling back. Describing the same bytes as a partition as well gives
@@ -207,7 +207,7 @@ const PARTITION_GUID: [u8; 16] = *b"KestrelIsoEsp001";
 /// what `xorriso`'s `-efi-boot-part --protective-msdos-label` produces, and why
 /// the standard Limine ISO recipe passes them.
 ///
-/// The partition table lives in the ISO 9660 *system area* — the first 32 KiB,
+/// The partition table lives in the ISO 9660 *system area* â€” the first 32 KiB,
 /// which the format reserves and never uses.
 fn write_hybrid_gpt(image: &mut [u8], boot_image_lba: u32, boot_image_sectors: u32) {
     let total_sectors = (image.len() / SECTOR) as u64;
@@ -465,7 +465,7 @@ fn write_boot_catalog(image: &mut [u8], boot_image_lba: u32, boot_image_bytes: u
     entry[8..12].copy_from_slice(&boot_image_lba.to_le_bytes());
 }
 
-/// Root (identifier `\0`, padded to even), plus `BOOT` and `BIN` (padded).
+/// Root (identifier `\0`, padded to even), plus `BOOT` and `REPO`.
 const PATH_TABLE_SIZE: u32 = 10 + 12 + 12;
 
 /// Path tables list every directory. Type L is little-endian, type M big.
@@ -495,13 +495,13 @@ fn write_path_tables(image: &mut [u8]) {
         sector[16..18].copy_from_slice(&parent(1));
         sector[18..22].copy_from_slice(b"BOOT");
 
-        // Directory 3: /BIN. Its identifier is odd-length, so it is padded to
-        // keep the following record aligned.
-        sector[22] = 3;
+        // Directory 3: /REPO. Four characters, so the record is already even
+        // and needs no padding byte after it.
+        sector[22] = 4;
         sector[23] = 0;
-        sector[24..28].copy_from_slice(&extent(BIN_DIRECTORY_LBA));
+        sector[24..28].copy_from_slice(&extent(REPO_DIRECTORY_LBA));
         sector[28..30].copy_from_slice(&parent(1));
-        sector[30..33].copy_from_slice(b"BIN");
-        sector[33] = 0; // padding
+        sector[30..34].copy_from_slice(b"REPO");
     }
 }
+

@@ -1,4 +1,4 @@
-//! An interactive shell running as a kernel task.
+﻿//! An interactive shell running as a kernel task.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -255,6 +255,7 @@ impl Shell {
             "net" => self.net(),
             "nic" => self.nic(),
             "open" => self.open_command(&args),
+            "store" => self.store_command(&args),
             "theme" => self.theme_command(&args),
             "set" => self.set_command(&args),
             "arp" => self.arp(&args),
@@ -283,7 +284,7 @@ impl Shell {
     /// What this build is, and what a beta tester should expect of it.
     fn version(&self) {
         println!(
-            "Kestrel {} \"{}\" — an experimental x86-64 operating system",
+            "Kestrel {} \"{}\" â€” an experimental x86-64 operating system",
             crate::VERSION,
             crate::CODENAME
         );
@@ -316,7 +317,7 @@ impl Shell {
         println!("  cpus                list processor cores");
         println!("  net                 network interface status");
         println!("  nic                 network card registers, for diagnosis");
-        println!("  open <window>       terminal, monitor or settings");
+        println!("  open <window>       terminal, monitor, settings or software");
         println!("  theme               show, preset, save, load or reset the look");
         println!("  set <name> <value>  change one appearance setting");
         println!("  arp [ip]            show or request address resolution");
@@ -324,7 +325,7 @@ impl Shell {
         println!("  history             previously entered commands");
         println!("  reboot / shutdown   stop the machine");
         println!("  spin                spawn a busy task, to show preemption");
-        println!("  exec <file>         run an ELF program in its own address space");
+        println!("  store               browse, install and remove programs");
         println!("                      (/bin is in RAM, /disk is the real disk)");
         println!("  mem                 memory statistics");
         println!("  uptime              time since boot");
@@ -466,10 +467,27 @@ impl Shell {
 
     fn exec(&mut self, args: &[&str]) {
         let Some(name) = args.first() else {
-            println!("usage: exec <file>   (try /bin/hello)");
+            println!("usage: exec <program>   ('store' lists what can be installed)");
             return;
         };
-        let path = self.resolve(name);
+
+        // A bare name means an installed program, so `exec snake` works
+        // without anyone having to know where installing put it. A name with a
+        // slash is a path and is taken literally.
+        let path = match name.contains('/') {
+            true => self.resolve(name),
+            false => match crate::store::resolve(name) {
+                Some(path) => path,
+                None => {
+                    if crate::store::catalogue().iter().any(|p| p.name == *name) {
+                        println!("exec: {name} is not installed - try 'store install {name}'");
+                    } else {
+                        println!("exec: no program called {name}");
+                    }
+                    return;
+                }
+            },
+        };
 
         let image = match vfs::read(&path) {
             Ok(data) => data,
@@ -605,7 +623,7 @@ impl Shell {
     /// be drawing at a time; this takes it and gives it back on exit.
     fn desktop(&mut self) {
         // `desktop` is dispatched from `on_key`, and the loop below feeds keys
-        // straight back into `on_key` — so typing it again inside the desktop
+        // straight back into `on_key` â€” so typing it again inside the desktop
         // would nest a second desktop inside the first.
         if self.in_desktop {
             println!("desktop: already running");
@@ -724,6 +742,59 @@ impl Shell {
         crate::desktop::with(|desktop| desktop.apply_theme(theme));
     }
 
+    /// Browse and install what the boot media offers.
+    fn store_command(&self, args: &[&str]) {
+        use crate::store;
+
+        match (args.first().copied(), args.get(1).copied()) {
+            (Some("install"), Some(name)) => match store::install(name) {
+                Ok(size) => {
+                    println!("installed {name} ({size} bytes) to {}", store::install_root());
+                    if !store::persistent() {
+                        println!("note: no writable disk, so this lasts until reboot");
+                    }
+                }
+                Err(e) => println!("store: {e}"),
+            },
+
+            (Some("remove"), Some(name)) => match store::remove(name) {
+                Ok(()) => println!("removed {name}"),
+                Err(e) => println!("store: {e}"),
+            },
+
+            (Some("install" | "remove"), None) => {
+                println!("usage: store install <name> | store remove <name>")
+            }
+
+            (Some(other), _) => println!("store: no such command {other:?}"),
+
+            (None, _) => {
+                let packages = store::catalogue();
+                if packages.is_empty() {
+                    println!("  the repository is empty");
+                    return;
+                }
+
+                for package in &packages {
+                    println!(
+                        "  {:<10} {:>6}  {:<9} {}",
+                        package.name,
+                        package.size,
+                        if package.installed { "installed" } else { "" },
+                        package.summary
+                    );
+                }
+
+                println!();
+                println!("  store install <name>   put one on this system");
+                println!("  store remove <name>    take it off again");
+                if !store::persistent() {
+                    println!("  no writable disk: installs last until reboot");
+                }
+            }
+        }
+    }
+
     /// Open a desktop window by name, for when the mouse is not an option.
     ///
     /// The launcher can do this too, but a keyboard route matters: Hyper-V has
@@ -732,7 +803,7 @@ impl Shell {
         use crate::desktop::Kind;
 
         let Some(name) = args.first() else {
-            println!("usage: open <terminal|monitor|settings>");
+            println!("usage: open <terminal|monitor|settings|software>");
             return;
         };
 
@@ -740,6 +811,7 @@ impl Shell {
             "terminal" | "shell" => Kind::Terminal,
             "monitor" | "system" => Kind::Monitor,
             "settings" => Kind::Settings,
+            "software" | "store" => Kind::Software,
             other => {
                 println!("open: no window called {other:?}");
                 return;
@@ -747,7 +819,7 @@ impl Shell {
         };
 
         if !self.in_desktop {
-            println!("open: only inside the desktop — run 'desktop' first");
+            println!("open: only inside the desktop â€” run 'desktop' first");
             return;
         }
 
@@ -799,7 +871,7 @@ impl Shell {
                 Some(theme) => {
                     crate::theme::replace(theme);
                     self.refresh_desktop();
-                    println!("{name} applied — 'theme save' to keep it");
+                    println!("{name} applied â€” 'theme save' to keep it");
                 }
                 None => println!(
                     "theme: no preset called {name:?} (try {})",
@@ -1013,7 +1085,7 @@ impl Shell {
 /// Build a window of the given kind, sized to the screen.
 ///
 /// One place, used both when the desktop opens and when the launcher reopens
-/// something that was closed — so a reopened window is identical to the one
+/// something that was closed â€” so a reopened window is identical to the one
 /// that was there at the start rather than a second, subtly different version.
 fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crate::desktop::Window {
     use crate::desktop::{Kind, Window};
@@ -1025,6 +1097,9 @@ fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crat
         // laid out in character cells, and this is what holds them all at the
         // default text size without scrolling.
         Kind::Settings => Window::new(kind, 120, 120, (width * 5 / 10).max(520), 460),
+
+        // Taller than Settings: one row per package, two lines each.
+        Kind::Software => Window::new(kind, 150, 100, (width * 5 / 10).max(520), 500),
 
         Kind::Monitor => {
             // Placed so it stays on screen: the right edge is measured back
@@ -1102,3 +1177,6 @@ fn spinner() {
 pub fn run() -> ! {
     Shell::new().run()
 }
+
+
+

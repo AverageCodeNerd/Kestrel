@@ -122,17 +122,19 @@ pub enum Kind {
     Terminal,
     Monitor,
     Settings,
+    Software,
 }
 
 impl Kind {
     /// The order the launcher lists them in.
-    pub const ALL: [Kind; 3] = [Kind::Terminal, Kind::Monitor, Kind::Settings];
+    pub const ALL: [Kind; 4] = [Kind::Terminal, Kind::Monitor, Kind::Settings, Kind::Software];
 
     pub fn title(self) -> &'static str {
         match self {
             Kind::Terminal => "Terminal",
             Kind::Monitor => "System Monitor",
             Kind::Settings => "Settings",
+            Kind::Software => "Software",
         }
     }
 
@@ -141,6 +143,7 @@ impl Kind {
             Kind::Terminal => "The Kestrel shell",
             Kind::Monitor => "Hardware overview",
             Kind::Settings => "Change how this looks",
+            Kind::Software => "Install and remove programs",
         }
     }
 }
@@ -312,18 +315,26 @@ impl Desktop {
         }
     }
 
+    /// The controls a window shows. One description, used to draw them and to
+    /// decide what was clicked, so the two cannot disagree.
+    fn controls(
+        &self,
+        kind: Kind,
+        x: isize,
+        y: isize,
+        width: usize,
+    ) -> alloc::vec::Vec<settings::Item> {
+        match kind {
+            Kind::Software => settings::software_layout(x, y, width, self.m.cell_w, self.m.cell_h),
+            _ => settings::layout(&self.theme, x, y, width, self.m.cell_w, self.m.cell_h),
+        }
+    }
+
     /// Work out which control was clicked, and do it.
     fn click_settings(&mut self, index: usize, x: isize, y: isize) {
         let window = &self.windows[index];
         let body_y = window.y + self.m.title_height as isize;
-        let items = settings::layout(
-            &self.theme,
-            window.x,
-            body_y,
-            window.width,
-            self.m.cell_w,
-            self.m.cell_h,
-        );
+        let items = self.controls(window.kind, window.x, body_y, window.width);
 
         let Some(action) = items
             .iter()
@@ -898,9 +909,10 @@ impl Desktop {
             self.plot((close_x + step as isize) as usize, (close_y + far as isize) as usize, mark);
         }
 
-        // The Settings window draws controls rather than text.
-        if self.windows[index].kind == Kind::Settings {
-            self.draw_settings(x, y + title_height as isize, width);
+        // Some windows draw controls rather than text.
+        if matches!(self.windows[index].kind, Kind::Settings | Kind::Software) {
+            let kind = self.windows[index].kind;
+            self.draw_controls(kind, x, y + title_height as isize, width);
             return;
         }
 
@@ -932,8 +944,8 @@ impl Desktop {
     ///
     /// Walks the same list `handle_mouse` hit-tests against, so a control
     /// cannot be drawn somewhere it cannot be clicked.
-    fn draw_settings(&mut self, x: isize, y: isize, width: usize) {
-        let items = settings::layout(&self.theme, x, y, width, self.m.cell_w, self.m.cell_h);
+    fn draw_controls(&mut self, kind: Kind, x: isize, y: isize, width: usize) {
+        let items = self.controls(kind, x, y, width);
 
         for item in items {
             let (fill, ink) = match item.style {
@@ -1185,7 +1197,7 @@ impl Desktop {
 
             // A click in the body of the Settings window works a control.
             // Checked after the title bar so dragging still wins there.
-            if self.windows[index].kind == Kind::Settings
+            if matches!(self.windows[index].kind, Kind::Settings | Kind::Software)
                 && self.windows[index].contains_body(x, y)
             {
                 self.focused = index;
@@ -1257,4 +1269,6 @@ pub fn with<T>(body: impl FnOnce(&mut Desktop) -> T) -> Option<T> {
 pub fn active() -> bool {
     x86_64::instructions::interrupts::without_interrupts(|| DESKTOP.lock().is_some())
 }
+
+
 
