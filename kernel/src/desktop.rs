@@ -123,10 +123,14 @@ pub enum Kind {
     Monitor,
     Settings,
     Software,
+    /// A window a running program draws into. Not in the launcher: it exists
+    /// only while something owns it.
+    Surface,
 }
 
 impl Kind {
-    /// The order the launcher lists them in.
+    /// The order the launcher lists them in. `Surface` is absent on purpose:
+    /// it exists only while a program owns it, so there is nothing to open.
     pub const ALL: [Kind; 4] = [Kind::Terminal, Kind::Monitor, Kind::Settings, Kind::Software];
 
     pub fn title(self) -> &'static str {
@@ -135,6 +139,7 @@ impl Kind {
             Kind::Monitor => "System Monitor",
             Kind::Settings => "Settings",
             Kind::Software => "Software",
+            Kind::Surface => "Program",
         }
     }
 
@@ -144,6 +149,7 @@ impl Kind {
             Kind::Monitor => "Hardware overview",
             Kind::Settings => "Change how this looks",
             Kind::Software => "Install and remove programs",
+            Kind::Surface => "A running program",
         }
     }
 }
@@ -157,6 +163,11 @@ pub struct Window {
     pub height: usize,
     /// Text content, one entry per line.
     pub lines: Vec<String>,
+    /// Pixels, for a window a program draws into. One `u32` per pixel, row by
+    /// row, `surface_width` wide.
+    surface: Vec<u32>,
+    surface_width: usize,
+    surface_height: usize,
     /// Copied from the theme rather than looked up, so `rows` and `push` keep
     /// signatures the shell can call without knowing about theming. The
     /// compositor refreshes these whenever the theme changes.
@@ -175,9 +186,17 @@ impl Window {
             width,
             height,
             lines: Vec::new(),
+            surface: Vec::new(),
+            surface_width: 0,
+            surface_height: 0,
             title_height: theme.title_height,
             cell_height: theme.cell_height(),
         }
+    }
+
+    /// Where the inside of the window starts, below the title bar.
+    fn body_origin(&self) -> (isize, isize) {
+        (self.x, self.y + self.title_height as isize)
     }
 
     /// How many text rows fit inside this window.
@@ -410,6 +429,100 @@ impl Desktop {
     /// and the shell services it on the next pass.
     pub fn take_open_request(&mut self) -> Option<Kind> {
         self.open_request.take()
+    }
+
+    /// Collect anything a drawing program has left for us, and publish where
+    /// the pointer is for it to read next time.
+    ///
+    /// Called by the compositor's own loop, which already holds the desktop,
+    /// so nothing here has to lock it.
+    pub fn service_surface(&mut self) {
+        if let Some((width, height, title)) = mailbox::REQUEST.lock().take() {
+            self.open_surface(&title, width, height);
+        }
+
+        if mailbox::FRAME_READY.swap(false, Ordering::Relaxed) {
+            let frame = mailbox::FRAME.lock();
+            self.blit_surface(&frame);
+        }
+
+        mailbox::POINTER.store(self.pointer_in_surface(), Ordering::Relaxed);
+    }
+
+    /// Give a program a window to draw in, replacing any it already had.
+    ///
+    /// Placed roughly in the middle and clamped to the screen, because a
+    /// program has no idea what else is open or how big the display is.
+    pub fn open_surface(&mut self, title: &str, width: usize, height: usize) {
+        // The frame adds a title bar and a border on each side.
+        let frame_width = width + self.m.border * 2;
+        let frame_height = height + self.m.title_height + self.m.border;
+
+        let x = (self.width.saturating_sub(frame_width) / 2) as isize;
+        let y = (self.height.saturating_sub(frame_height) / 3) as isize;
+
+        // One surface at a time: a program that asks twice is resizing, not
+        // opening a second window.
+        if let Some(index) = self.find(Kind::Surface) {
+            self.close(index);
+        }
+
+        let mut window = Window::new(Kind::Surface, x, y, frame_width, frame_height);
+        window.title = String::from(title);
+        window.surface = vec![0; width * height];
+        window.surface_width = width;
+        window.surface_height = height;
+
+        self.open(window);
+    }
+
+    /// Take a frame from the program that owns the surface.
+    ///
+    /// A frame of the wrong size is refused rather than stretched or padded:
+    /// silently accepting it would show something the program did not draw.
+    pub fn blit_surface(&mut self, pixels: &[u32]) -> bool {
+        let Some(index) = self.find(Kind::Surface) else {
+            return false;
+        };
+
+        let window = &mut self.windows[index];
+        if pixels.len() != window.surface.len() {
+            return false;
+        }
+
+        window.surface.copy_from_slice(pixels);
+        self.invalidate_window(index);
+        true
+    }
+
+    /// The pointer's position inside the surface, packed for a system call.
+    ///
+    /// Returns `u64::MAX` when the pointer is outside the window, which a
+    /// program reads as "not over me" rather than as a position it should
+    /// draw at.
+    pub fn pointer_in_surface(&self) -> u64 {
+        let Some(index) = self.find(Kind::Surface) else {
+            return u64::MAX;
+        };
+
+        let window = &self.windows[index];
+        let (origin_x, origin_y) = window.body_origin();
+        let (x, y) = self.last_cursor;
+
+        let inside_x = x >= origin_x + self.m.border as isize
+            && x < origin_x + (self.m.border + window.surface_width) as isize;
+        let inside_y = y >= origin_y && y < origin_y + window.surface_height as isize;
+
+        if !inside_x || !inside_y {
+            return u64::MAX;
+        }
+
+        let local_x = (x - origin_x - self.m.border as isize) as u64;
+        let local_y = (y - origin_y) as u64;
+        let (left, right, middle) = crate::mouse::buttons();
+        let buttons = u64::from(left) | (u64::from(right) << 1) | (u64::from(middle) << 2);
+
+        (buttons << 32) | (local_y << 16) | local_x
     }
 
     /// Ask for a window, as the launcher does. Focuses it if already open.
@@ -909,6 +1022,13 @@ impl Desktop {
             self.plot((close_x + step as isize) as usize, (close_y + far as isize) as usize, mark);
         }
 
+        // A program's window shows whatever it last drew.
+        if self.windows[index].kind == Kind::Surface {
+            let (origin_x, origin_y) = self.windows[index].body_origin();
+            self.draw_surface(index, origin_x + self.m.border as isize, origin_y);
+            return;
+        }
+
         // Some windows draw controls rather than text.
         if matches!(self.windows[index].kind, Kind::Settings | Kind::Software) {
             let kind = self.windows[index].kind;
@@ -944,6 +1064,35 @@ impl Desktop {
     ///
     /// Walks the same list `handle_mouse` hit-tests against, so a control
     /// cannot be drawn somewhere it cannot be clicked.
+    /// Copy a program's pixels into the compositor's buffer.
+    ///
+    /// Through `plot`, so the damage clip applies exactly as it does to
+    /// everything else — a program's window is composited like any other and
+    /// cannot paint outside its own rectangle.
+    fn draw_surface(&mut self, index: usize, x: isize, y: isize) {
+        let (width, height) = (
+            self.windows[index].surface_width,
+            self.windows[index].surface_height,
+        );
+        // Cloned because plot borrows self mutably. A frame is copied on blit
+        // anyway, so this is the same cost the design already accepted.
+        let pixels = self.windows[index].surface.clone();
+
+        for row in 0..height {
+            let py = y + row as isize;
+            if py < 0 {
+                continue;
+            }
+            for column in 0..width {
+                let px = x + column as isize;
+                if px < 0 {
+                    continue;
+                }
+                self.plot(px as usize, py as usize, pixels[row * width + column]);
+            }
+        }
+    }
+
     fn draw_controls(&mut self, kind: Kind, x: isize, y: isize, width: usize) {
         let items = self.controls(kind, x, y, width);
 
@@ -1245,6 +1394,65 @@ fn wrap(text: &str, columns: usize) -> Vec<&str> {
     pieces
 }
 
+/// Whether a desktop is running, readable without taking any lock.
+pub static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// What a drawing program has asked for, and what it has drawn.
+///
+/// A system call must never take the `DESKTOP` lock. `desktop::with` disables
+/// interrupts and then spins for it, so a program blocking there on the same
+/// core the compositor runs on stops that core from ever running the
+/// compositor again — the lock is never released and the machine is wedged.
+/// Requests are left here instead and collected by the compositor on its own
+/// terms, the same way terminal output and Settings notices already work.
+mod mailbox {
+    use super::*;
+
+    pub static REQUEST: Mutex<Option<(usize, usize, String)>> = Mutex::new(None);
+    pub static FRAME: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    pub static FRAME_READY: AtomicBool = AtomicBool::new(false);
+    /// Width and height of the surface in force, packed, so `blit` can check a
+    /// frame's size without reaching into the compositor.
+    pub static SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    /// The pointer's position inside the surface, published each frame.
+    pub static POINTER: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(u64::MAX);
+}
+
+/// Ask for a window to draw in. Called from a system call, so it only records
+/// the request.
+pub fn request_surface(title: &str, width: usize, height: usize) -> bool {
+    if !ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    *mailbox::REQUEST.lock() = Some((width, height, String::from(title)));
+    mailbox::SIZE.store(((width as u64) << 32) | height as u64, Ordering::Relaxed);
+    // Anything half-drawn for the previous size would be the wrong shape now.
+    mailbox::FRAME_READY.store(false, Ordering::Relaxed);
+    true
+}
+
+/// Hand over a frame. Refused if it is not the size that was asked for.
+pub fn submit_frame(pixels: &[u32]) -> bool {
+    let packed = mailbox::SIZE.load(Ordering::Relaxed);
+    let expected = (packed >> 32) as usize * (packed & 0xFFFF_FFFF) as usize;
+    if expected == 0 || pixels.len() != expected {
+        return false;
+    }
+
+    let mut frame = mailbox::FRAME.lock();
+    frame.clear();
+    frame.extend_from_slice(pixels);
+    mailbox::FRAME_READY.store(true, Ordering::Relaxed);
+    true
+}
+
+/// Where the pointer was inside the surface, as of the last frame drawn.
+pub fn surface_pointer() -> u64 {
+    mailbox::POINTER.load(Ordering::Relaxed)
+}
+
 pub static DESKTOP: Mutex<Option<Desktop>> = Mutex::new(None);
 
 /// Set when something has painted over the framebuffer behind the compositor's
@@ -1269,6 +1477,7 @@ pub fn with<T>(body: impl FnOnce(&mut Desktop) -> T) -> Option<T> {
 pub fn active() -> bool {
     x86_64::instructions::interrupts::without_interrupts(|| DESKTOP.lock().is_some())
 }
+
 
 
 

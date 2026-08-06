@@ -185,6 +185,10 @@ const PACKAGES: &[Package] = &[
         summary: "The game. Steer with wasd",
     },
     Package {
+        name: "paint",
+        summary: "Draw with the mouse. Needs the desktop",
+    },
+    Package {
         name: "hello",
         summary: "Prints a greeting from ring 3",
     },
@@ -198,7 +202,7 @@ const PACKAGES: &[Package] = &[
     },
 ];
 
-const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit", "snake"];
+const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit", "snake", "paint"];
 
 /// Build the userspace programs.
 ///
@@ -695,6 +699,7 @@ fn wait_until_written(path: &Path) -> std::io::Result<()> {
         "screendump never completed",
     ))
 }
+
 
 
 

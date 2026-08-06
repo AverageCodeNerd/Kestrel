@@ -69,7 +69,10 @@ pub fn installed_path(name: &str) -> String {
 }
 
 pub fn is_installed(name: &str) -> bool {
-    crate::vfs::read(&installed_path(name)).is_ok()
+    // `exists` rather than `read`: reading pulls the whole binary off the disk
+    // to answer a yes-or-no question, which the catalogue asks once per package
+    // every time it is drawn.
+    crate::vfs::exists(&installed_path(name))
 }
 
 /// Everything the repository offers.
@@ -149,5 +152,7 @@ pub fn remove(name: &str) -> Result<(), String> {
 /// mean nothing.
 pub fn resolve(name: &str) -> Option<String> {
     let path = installed_path(name);
-    crate::vfs::read(&path).ok().map(|_| path)
+    // Existence only. The caller reads the image itself, and doing it here as
+    // well meant every `exec` pulled the binary off the disk twice.
+    crate::vfs::exists(&path).then_some(path)
 }

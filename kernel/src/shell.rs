@@ -8,6 +8,7 @@ use crate::{allocator, apic, cpu, keyboard, memory, print, println, task, termin
 
 const PROMPT: &str = "kestrel:";
 
+
 pub struct Shell {
     line: String,
     /// Insert position within `line`. Input is ASCII, so bytes and characters
@@ -566,6 +567,10 @@ impl Shell {
         };
 
         crate::desktop::with(|desktop| {
+            // Anything a drawing program asked for or drew, collected here
+            // where the desktop is already held rather than from its syscall.
+            desktop.service_surface();
+
             if let Some(kind) = desktop.take_open_request() {
                 let (width, height) = desktop.size();
                 desktop.open(build_window(kind, width, height));
@@ -660,6 +665,7 @@ impl Shell {
         self.terminal = Some(terminal::Terminal::new(terminal_rows.max(1) + 200));
         terminal::start_capture();
         self.in_desktop = true;
+        crate::desktop::ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
 
         println!("Kestrel terminal - the shell, in a window.");
         println!("Esc returns to the console.");
@@ -701,6 +707,7 @@ impl Shell {
 
         self.in_desktop = false;
         self.terminal = None;
+        crate::desktop::ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
         terminal::stop_capture();
         *crate::desktop::DESKTOP.lock() = None;
 
@@ -1091,6 +1098,11 @@ fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crat
     use crate::desktop::{Kind, Window};
 
     match kind {
+        // A program's window is created by the program, through the surface
+        // system call, so this is only ever reached if something asks for one
+        // by mistake. An empty window is a clearer answer than a panic.
+        Kind::Surface => Window::new(kind, 200, 200, 320, 240),
+
         Kind::Terminal => Window::new(kind, 180, 66, width * 6 / 10, height / 2),
 
         // Sized to its contents rather than to the screen: the controls are
@@ -1177,6 +1189,9 @@ fn spinner() {
 pub fn run() -> ! {
     Shell::new().run()
 }
+
+
+
 
 
 

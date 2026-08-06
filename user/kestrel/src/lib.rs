@@ -22,6 +22,18 @@ pub const SYS_STORE: u64 = 7;
 pub const SYS_SLEEP: u64 = 8;
 pub const SYS_POLL: u64 = 9;
 pub const SYS_CLEAR: u64 = 10;
+pub const SYS_SURFACE: u64 = 11;
+pub const SYS_BLIT: u64 = 12;
+pub const SYS_POINTER: u64 = 13;
+
+/// Where the mouse is inside a program's window, and what is held down.
+pub struct Pointer {
+    pub x: usize,
+    pub y: usize,
+    pub left: bool,
+    pub right: bool,
+    pub middle: bool,
+}
 
 /// Every call returns this on failure. It is `-1` read as unsigned, which is
 /// how the kernel reports an error without a second return value.
@@ -194,6 +206,46 @@ pub fn read_key() -> Option<u8> {
 /// Wipe the screen and start again at the top.
 pub fn clear() {
     unsafe { syscall(SYS_CLEAR, 0, 0, 0, 0) };
+}
+
+// --------------------------------------------------------------- drawing ---
+
+/// Ask for a window of this size to draw in. False if there is no desktop.
+///
+/// The kernel keeps the pixels; this program never sees the framebuffer, only
+/// its own rectangle.
+pub fn surface(width: usize, height: usize, title: &str) -> bool {
+    unsafe {
+        syscall(
+            SYS_SURFACE,
+            width as u64,
+            height as u64,
+            title.as_ptr() as u64,
+            title.len() as u64,
+        ) == 0
+    }
+}
+
+/// Show a frame. Must be exactly the size asked for, row by row.
+pub fn blit(pixels: &[u32]) -> bool {
+    unsafe { syscall(SYS_BLIT, pixels.as_ptr() as u64, pixels.len() as u64, 0, 0) == 0 }
+}
+
+/// Where the pointer is inside the window, or `None` when it is elsewhere.
+pub fn pointer() -> Option<Pointer> {
+    let packed = unsafe { syscall(SYS_POINTER, 0, 0, 0, 0) };
+    if packed == FAILED {
+        return None;
+    }
+
+    let buttons = packed >> 32;
+    Some(Pointer {
+        x: (packed & 0xFFFF) as usize,
+        y: ((packed >> 16) & 0xFFFF) as usize,
+        left: buttons & 1 != 0,
+        right: buttons & 2 != 0,
+        middle: buttons & 4 != 0,
+    })
 }
 
 pub fn getpid() -> u64 {

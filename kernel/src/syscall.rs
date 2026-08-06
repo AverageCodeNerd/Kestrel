@@ -1,4 +1,4 @@
-//! The SYSCALL/SYSRET system call interface.
+﻿//! The SYSCALL/SYSRET system call interface.
 //!
 //! `syscall` is fast because it does almost nothing: it loads CS/SS from
 //! fixed MSRs, stashes the return address in RCX and the flags in R11, and
@@ -15,19 +15,30 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_EXIT: u64 = 2;
 pub const SYS_GETPID: u64 = 3;
 pub const SYS_YIELD: u64 = 4;
-/// read(fd, buffer, length) — from the keyboard or the serial console.
+/// read(fd, buffer, length) â€” from the keyboard or the serial console.
 pub const SYS_READ: u64 = 5;
-/// load(path, length, buffer, capacity) — a whole file at once.
+/// load(path, length, buffer, capacity) â€” a whole file at once.
 pub const SYS_LOAD: u64 = 6;
-/// store(path, length, buffer, count) — replace a whole file.
+/// store(path, length, buffer, count) â€” replace a whole file.
 pub const SYS_STORE: u64 = 7;
 /// sleep(milliseconds).
 pub const SYS_SLEEP: u64 = 8;
 /// poll() -> 1 if a keystroke is waiting. Lets a program stay responsive
 /// without blocking, which is what anything animated needs.
 pub const SYS_POLL: u64 = 9;
-/// clear() — wipe the screen and return to the top.
+/// clear() â€” wipe the screen and return to the top.
 pub const SYS_CLEAR: u64 = 10;
+/// surface(width, height, title, title_length) â€” ask for a window to draw in.
+pub const SYS_SURFACE: u64 = 11;
+/// blit(pixels, count) â€” push a frame to that window.
+pub const SYS_BLIT: u64 = 12;
+/// pointer() â€” where the mouse is within the window, and which buttons are
+/// down, packed as `(buttons << 32) | (y << 16) | x`.
+pub const SYS_POINTER: u64 = 13;
+
+/// The largest window a program may ask for, in pixels. Bounds what a single
+/// `blit` can be asked to copy.
+const MAX_SURFACE: u64 = 1920 * 1080;
 
 /// The longest path a program may pass in. Enough for anything the FAT32
 /// driver can represent, and small enough to copy onto the kernel stack.
@@ -61,7 +72,7 @@ unsafe extern "C" fn syscall_entry() {
 
         // Save everything the user might care about. `dispatch` is an ordinary
         // Rust function, so it will happily clobber every caller-saved
-        // register — including the argument registers and r8-r10, which a
+        // register â€” including the argument registers and r8-r10, which a
         // user program has no reason to expect are destroyed.
         //
         // The contract this establishes matches Linux: a system call
@@ -86,7 +97,7 @@ unsafe extern "C" fn syscall_entry() {
         // Safe to take interrupts again now that we are off the user stack.
         // Leaving them masked for the whole call would drop keystrokes during
         // anything slow, such as drawing to the framebuffer. An interrupt
-        // arriving here does not switch stacks — we are already in ring 0 —
+        // arriving here does not switch stacks â€” we are already in ring 0 â€”
         // so it simply nests on this stack.
         "sti",
 
@@ -145,6 +156,9 @@ extern "C" fn dispatch(number: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
             crate::print::clear();
             0
         }
+        SYS_SURFACE => sys_surface(a, b, c, d),
+        SYS_BLIT => sys_blit(a, b),
+        SYS_POINTER => crate::desktop::surface_pointer(),
         // Terminates the calling task rather than returning to ring 3. The
         // task's stacks and address space stay allocated until something
         // reaps it; nothing does yet.
@@ -297,6 +311,53 @@ fn sys_store(path: u64, path_length: u64, buffer: u64, count: u64) -> u64 {
     }
 }
 
+/// surface(width, height, title, title_length) -> 0, or -1.
+///
+/// Asks the compositor for a window the program owns the inside of. The kernel
+/// keeps the pixels and does the copying, rather than mapping the framebuffer
+/// into the process: a program that could reach the framebuffer directly could
+/// draw over every other window, and would have to be trusted with the screen's
+/// exact layout. This way it only ever sees its own rectangle.
+fn sys_surface(width: u64, height: u64, title: u64, title_length: u64) -> u64 {
+    if width == 0 || height == 0 || width * height > MAX_SURFACE {
+        return u64::MAX;
+    }
+
+    let name = match user_path(title, title_length) {
+        Some(name) => name,
+        // A window with no name is still a window; only a bad pointer is an
+        // error worth refusing.
+        None if title == 0 => alloc::string::String::from("Program"),
+        None => return u64::MAX,
+    };
+
+    // Recorded for the compositor rather than done here: a system call must
+    // not take the DESKTOP lock. See desktop::mailbox.
+    match crate::desktop::request_surface(&name, width as usize, height as usize) {
+        true => 0,
+        // No desktop: the program is on the console, where there is nowhere to
+        // put a window.
+        false => u64::MAX,
+    }
+}
+
+/// blit(pixels, count) -> 0, or -1. One `u32` per pixel, row by row.
+fn sys_blit(pixels: u64, count: u64) -> u64 {
+    if count == 0 || count > MAX_SURFACE {
+        return u64::MAX;
+    }
+    // Four bytes each, which is what makes this bigger than a normal transfer.
+    if pixels == 0 || !is_user_address(pixels) || !is_user_address(pixels + count * 4) {
+        return u64::MAX;
+    }
+
+    let data = unsafe { core::slice::from_raw_parts(pixels as *const u32, count as usize) };
+    match crate::desktop::submit_frame(data) {
+        true => 0,
+        false => u64::MAX,
+    }
+}
+
 /// sleep(milliseconds). Rounded up to the 10 ms timer tick.
 fn sys_sleep(milliseconds: u64) -> u64 {
     // A tick is 10 ms, so anything shorter still costs one; asking for zero
@@ -346,3 +407,4 @@ pub fn init() {
         Efer::update(|flags| flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
     }
 }
+
