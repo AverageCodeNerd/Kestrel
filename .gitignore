@@ -1,6 +1,13 @@
 /target
 /build
 
+# Editor and IDE state. Visual Studio's .vs/ holds databases and window layouts
+# that are specific to one machine and change constantly.
+/.vs
+/.idea
+/.vscode
+*.user
+
 # Staged release artifacts. Images are tens of megabytes and are rebuilt by
 # release.ps1, so they belong on a GitHub release rather than in the history.
 /release
