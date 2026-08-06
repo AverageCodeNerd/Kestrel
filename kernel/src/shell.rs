@@ -246,6 +246,7 @@ impl Shell {
             "desktop" => self.desktop(),
             "net" => self.net(),
             "nic" => self.nic(),
+            "open" => self.open_command(&args),
             "theme" => self.theme_command(&args),
             "set" => self.set_command(&args),
             "arp" => self.arp(&args),
@@ -307,6 +308,7 @@ impl Shell {
         println!("  cpus                list processor cores");
         println!("  net                 network interface status");
         println!("  nic                 network card registers, for diagnosis");
+        println!("  open <window>       terminal, monitor or settings");
         println!("  theme               show, preset, save, load or reset the look");
         println!("  set <name> <value>  change one appearance setting");
         println!("  arp [ip]            show or request address resolution");
@@ -523,7 +525,9 @@ impl Shell {
         let mut desktop = unsafe { crate::desktop::Desktop::new(fb) };
         let (width, height) = desktop.size();
 
-        for kind in crate::desktop::Kind::ALL {
+        // Settings is available from the launcher but not open at the start;
+        // a window nobody asked for is clutter.
+        for kind in [crate::desktop::Kind::Terminal, crate::desktop::Kind::Monitor] {
             let window = build_window(kind, width, height);
             desktop.windows.push(window);
         }
@@ -573,6 +577,12 @@ impl Shell {
 
             // Drain outside the lock too, for the same reason.
             let output = terminal::drain();
+
+            // Anything the Settings window wanted to say. Printed here rather
+            // than from inside the compositor, which runs holding the lock.
+            if let Some(message) = crate::desktop::with(|d| d.take_notice()).flatten() {
+                println!("{message}");
+            }
 
             // Sample the mouse several times per frame. A full redraw takes
             // long enough that polling once per frame misses short clicks and
@@ -645,6 +655,39 @@ impl Shell {
     fn refresh_desktop(&self) {
         let theme = crate::theme::current();
         crate::desktop::with(|desktop| desktop.apply_theme(theme));
+    }
+
+    /// Open a desktop window by name, for when the mouse is not an option.
+    ///
+    /// The launcher can do this too, but a keyboard route matters: Hyper-V has
+    /// no PS/2 mouse at all, and the serial console has no pointer either.
+    fn open_command(&self, args: &[&str]) {
+        use crate::desktop::Kind;
+
+        let Some(name) = args.first() else {
+            println!("usage: open <terminal|monitor|settings>");
+            return;
+        };
+
+        let kind = match name.to_ascii_lowercase().as_str() {
+            "terminal" | "shell" => Kind::Terminal,
+            "monitor" | "system" => Kind::Monitor,
+            "settings" => Kind::Settings,
+            other => {
+                println!("open: no window called {other:?}");
+                return;
+            }
+        };
+
+        if !self.in_desktop {
+            println!("open: only inside the desktop — run 'desktop' first");
+            return;
+        }
+
+        // Routed through the same request the launcher uses, so there is one
+        // path that opens a window rather than two that can disagree.
+        crate::desktop::with(|desktop| desktop.request_open(kind));
+        println!("opening {}", kind.title());
     }
 
     fn theme_command(&self, args: &[&str]) {
@@ -910,6 +953,11 @@ fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crat
 
     match kind {
         Kind::Terminal => Window::new(kind, 180, 66, width * 6 / 10, height / 2),
+
+        // Sized to its contents rather than to the screen: the controls are
+        // laid out in character cells, and this is what holds them all at the
+        // default text size without scrolling.
+        Kind::Settings => Window::new(kind, 120, 120, (width * 5 / 10).max(520), 460),
 
         Kind::Monitor => {
             // Placed so it stays on screen: the right edge is measured back

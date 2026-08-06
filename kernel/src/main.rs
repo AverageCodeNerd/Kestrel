@@ -33,6 +33,7 @@ mod pit;
 mod print;
 mod process;
 mod serial;
+mod settings;
 mod shell;
 mod smp;
 mod syscall;
@@ -520,4 +521,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     halt()
 }
+
 

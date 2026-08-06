@@ -41,8 +41,13 @@ there is no TLS, so `fetch` reaches http:// but not https://.
 
 ## Making it yours
 
-The desktop reads its appearance from a theme rather than from constants, so
-every colour and most of the layout can be changed from the shell and kept:
+Open the launcher and pick **Settings** — presets, toggles and steppers, all
+applying as you click them. `open settings` does the same from the keyboard,
+which matters on machines with no working mouse.
+
+Everything there is also a shell command, because the Settings window and the
+`set` command drive the same theme module rather than each keeping their own
+idea of what a setting is:
 
 ```
 theme                       list every setting and its value

@@ -1,4 +1,4 @@
-//! A windowed desktop drawn straight into the framebuffer.
+﻿//! A windowed desktop drawn straight into the framebuffer.
 //!
 //! Composited back to front into an off-screen buffer, then copied to the
 //! screen in one pass. Drawing directly would mean every window visibly
@@ -12,12 +12,15 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::font;
+use crate::settings;
 use crate::theme::{Theme, Wallpaper};
 
 /// Fixed layout, in pixels, that nothing gains from making configurable.
 const LAUNCHER_X: isize = 6;
 const LAUNCHER_BUTTON_X: isize = 6;
-const LAUNCHER_ENTRIES: usize = 2;
+/// Derived from the list itself, so adding a window kind grows the menu
+/// instead of leaving the last entry drawn outside its own box.
+const LAUNCHER_ENTRIES: usize = Kind::ALL.len();
 
 /// Desktop shortcuts: a square icon with two lines of text beside it.
 const SHORTCUT_X: isize = 18;
@@ -31,7 +34,7 @@ const SHORTCUT_LABEL_X: isize = 58;
 /// Everything that measures itself in characters has to be recomputed when the
 /// text scale changes, so it is worked out once per theme change rather than
 /// being const. Keeping it in one struct is what stops the drawing code and
-/// the hit tests drifting apart — the bug this file has produced most often.
+/// the hit tests drifting apart â€” the bug this file has produced most often.
 #[derive(Clone, Copy)]
 struct Metrics {
     cell_w: usize,
@@ -111,23 +114,25 @@ struct Damage {
 /// What a window is for.
 ///
 /// Windows are found by role rather than by position, because closing one
-/// shifts every index after it — and the terminal being "window 0" is exactly
+/// shifts every index after it â€” and the terminal being "window 0" is exactly
 /// the assumption that would quietly send shell output into the System Monitor
 /// the first time somebody closed it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Terminal,
     Monitor,
+    Settings,
 }
 
 impl Kind {
     /// The order the launcher lists them in.
-    pub const ALL: [Kind; 2] = [Kind::Terminal, Kind::Monitor];
+    pub const ALL: [Kind; 3] = [Kind::Terminal, Kind::Monitor, Kind::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
             Kind::Terminal => "Terminal",
             Kind::Monitor => "System Monitor",
+            Kind::Settings => "Settings",
         }
     }
 
@@ -135,6 +140,7 @@ impl Kind {
         match self {
             Kind::Terminal => "The Kestrel shell",
             Kind::Monitor => "Hardware overview",
+            Kind::Settings => "Change how this looks",
         }
     }
 }
@@ -211,6 +217,14 @@ impl Window {
         let (bx, by, size) = self.close_button();
         x >= bx && x < bx + size as isize && y >= by && y < by + size as isize
     }
+
+    /// Inside the window, below the title bar.
+    fn contains_body(&self, x: isize, y: isize) -> bool {
+        x >= self.x
+            && x < self.x + self.width as isize
+            && y >= self.y + self.title_height as isize
+            && y < self.y + self.height as isize
+    }
 }
 
 pub struct Desktop {
@@ -243,6 +257,10 @@ pub struct Desktop {
     clip: Option<Damage>,
     /// A window the user clicked for in the launcher that is not open yet.
     open_request: Option<Kind>,
+    /// Something the desktop wants said in the terminal. Collected here rather
+    /// than printed, because printing from inside the compositor would run
+    /// while this task holds the DESKTOP lock.
+    notice: Option<String>,
     /// The appearance in force, copied so drawing never locks.
     theme: Theme,
     /// Layout derived from `theme`, recomputed only when it changes.
@@ -288,9 +306,48 @@ impl Desktop {
             }),
             clip: None,
             open_request: None,
+            notice: None,
             theme,
             m,
         }
+    }
+
+    /// Work out which control was clicked, and do it.
+    fn click_settings(&mut self, index: usize, x: isize, y: isize) {
+        let window = &self.windows[index];
+        let body_y = window.y + self.m.title_height as isize;
+        let items = settings::layout(
+            &self.theme,
+            window.x,
+            body_y,
+            window.width,
+            self.m.cell_w,
+            self.m.cell_h,
+        );
+
+        let Some(action) = items
+            .iter()
+            .find(|item| item.action.is_some() && item.contains(x, y))
+            .and_then(|item| item.action)
+        else {
+            // A click on a heading or on empty space: focus, nothing more.
+            self.invalidate_all();
+            return;
+        };
+
+        if let Some(message) = settings::apply(action) {
+            self.notice = Some(message);
+        }
+
+        // Every action changes the theme, and the window's own controls show
+        // the new values, so the whole screen is repainted either way.
+        self.apply_theme(crate::theme::current());
+    }
+
+    /// Take anything the desktop wants printed, for the caller to say outside
+    /// the lock.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -300,7 +357,7 @@ impl Desktop {
     /// Adopt a changed theme and repaint everything.
     ///
     /// The whole screen is invalidated because a theme change can move the
-    /// panel, resize every glyph and recolour every pixel at once — there is
+    /// panel, resize every glyph and recolour every pixel at once â€” there is
     /// no region small enough to be worth working out.
     pub fn apply_theme(&mut self, theme: Theme) {
         self.m = Metrics::from(&theme);
@@ -329,7 +386,7 @@ impl Desktop {
         self.windows.remove(index);
 
         // Every index after the removed one has shifted, including the one
-        // being dragged — simplest and safest is to drop the drag entirely.
+        // being dragged â€” simplest and safest is to drop the drag entirely.
         self.dragging = None;
         self.focused = self.focused.min(self.windows.len().saturating_sub(1));
         self.invalidate_all();
@@ -337,11 +394,22 @@ impl Desktop {
 
     /// A window the user asked for that does not exist yet.
     ///
-    /// The compositor knows what was clicked but not how to build a window —
-    /// where it goes, how big it is, what is in it — so it records the request
+    /// The compositor knows what was clicked but not how to build a window â€”
+    /// where it goes, how big it is, what is in it â€” so it records the request
     /// and the shell services it on the next pass.
     pub fn take_open_request(&mut self) -> Option<Kind> {
         self.open_request.take()
+    }
+
+    /// Ask for a window, as the launcher does. Focuses it if already open.
+    pub fn request_open(&mut self, kind: Kind) {
+        match self.find(kind) {
+            Some(index) => {
+                self.focused = index;
+                self.invalidate_all();
+            }
+            None => self.open_request = Some(kind),
+        }
     }
 
     /// Add a window and give it the focus, as opening something should.
@@ -447,8 +515,8 @@ impl Desktop {
 
     /// Mark one window's rectangle as needing a repaint.
     ///
-    /// Used when a window's *contents* change rather than its position — the
-    /// terminal window as output arrives — so a busy command does not force a
+    /// Used when a window's *contents* change rather than its position â€” the
+    /// terminal window as output arrives â€” so a busy command does not force a
     /// full-screen repaint per line.
     pub fn invalidate_window(&mut self, index: usize) {
         let Some(window) = self.windows.get(index) else {
@@ -588,7 +656,7 @@ impl Desktop {
     /// The Kestrel mark, drawn in the current theme's colours.
     ///
     /// `logo::part` gives the shape without committing to a palette, so the
-    /// falcon takes the theme rather than staying its own blue — an icon that
+    /// falcon takes the theme rather than staying its own blue â€” an icon that
     /// ignores the theme is the one thing that gives away a recoloured desktop
     /// as a recolouring.
     fn draw_logo(&mut self, x: usize, y: usize, size: usize) {
@@ -616,7 +684,7 @@ impl Desktop {
 
     /// Draw text truncated to `max_width` pixels.
     ///
-    /// Every label here sits in a box — a button, a title bar, a panel slot —
+    /// Every label here sits in a box â€” a button, a title bar, a panel slot â€”
     /// and unbounded text simply runs past it and over whatever is next. The
     /// truncation is marked so a clipped label is not mistaken for the name.
     fn draw_text_within(&mut self, x: isize, y: isize, text: &str, colour: u32, max_width: usize) {
@@ -660,7 +728,7 @@ impl Desktop {
     /// Whether `(x, y)` is inside the shortcut whose icon starts at `top`.
     ///
     /// The label is part of the shortcut as far as a user is concerned, so the
-    /// target covers the text too — measured from where the text is actually
+    /// target covers the text too â€” measured from where the text is actually
     /// drawn rather than guessed, which is how it came to stop short of it.
     fn in_shortcut(&self, x: isize, y: isize, top: isize) -> bool {
         x >= SHORTCUT_X
@@ -830,6 +898,12 @@ impl Desktop {
             self.plot((close_x + step as isize) as usize, (close_y + far as isize) as usize, mark);
         }
 
+        // The Settings window draws controls rather than text.
+        if self.windows[index].kind == Kind::Settings {
+            self.draw_settings(x, y + title_height as isize, width);
+            return;
+        }
+
         // Wrapped to the window's interior, then clipped to it as a backstop.
         //
         // Nothing may be drawn outside the window's own rectangle: a drag
@@ -854,12 +928,53 @@ impl Desktop {
         }
     }
 
+    /// The Settings window's controls.
+    ///
+    /// Walks the same list `handle_mouse` hit-tests against, so a control
+    /// cannot be drawn somewhere it cannot be clicked.
+    fn draw_settings(&mut self, x: isize, y: isize, width: usize) {
+        let items = settings::layout(&self.theme, x, y, width, self.m.cell_w, self.m.cell_h);
+
+        for item in items {
+            let (fill, ink) = match item.style {
+                settings::Style::Heading => (None, self.theme.text_dim),
+                settings::Style::Label | settings::Style::Value => (None, self.theme.text),
+                settings::Style::Button => (Some(self.theme.launcher), self.theme.light_text),
+                settings::Style::Active => {
+                    (Some(self.theme.launcher_selected), self.theme.light_text)
+                }
+            };
+
+            if let Some(colour) = fill {
+                self.fill(item.x, item.y, item.width, item.height, colour);
+            }
+
+            // Anything sitting in a box — a button, or a value between two of
+            // them — is centred in it. Headings and row labels start at the
+            // left, where the eye scans for them.
+            let boxed = fill.is_some() || item.style == settings::Style::Value;
+            let text_x = if boxed {
+                let text_width = item.label.chars().count() * self.m.cell_w;
+                item.x + (item.width as isize - text_width as isize).max(0) / 2
+            } else {
+                item.x
+            };
+            let text_y = if boxed {
+                item.y + (item.height as isize - self.m.cell_h as isize) / 2
+            } else {
+                item.y
+            };
+
+            self.draw_text_within(text_x, text_y, &item.label, ink, item.width);
+        }
+    }
+
     /// An arrow, drawn from a small bitmap so it reads at any background.
     ///
     /// It is drawn at `last_cursor`, not at the live pointer position. The
     /// mouse interrupt moves the pointer asynchronously, so re-reading it here
     /// could place the arrow outside the region `handle_mouse` invalidated for
-    /// it — half of it would be clipped away, and the other half would never be
+    /// it â€” half of it would be clipped away, and the other half would never be
     /// erased. Drawing where the damage says it is keeps the two in step; the
     /// next event invalidates the real position a frame later.
     fn draw_cursor(&mut self) {
@@ -1015,7 +1130,7 @@ impl Desktop {
                 if within {
                     if let Some(&kind) = Kind::ALL.get(row) {
                         // Focus it if it is open, otherwise ask for it to be
-                        // opened — which is what makes closing a window
+                        // opened â€” which is what makes closing a window
                         // recoverable rather than permanent.
                         match self.find(kind) {
                             Some(index) => self.focused = index,
@@ -1033,7 +1148,7 @@ impl Desktop {
 
         // The desktop shortcuts mirror the launcher entries, and behave the
         // same way: focus what is open, open what is not. By kind rather than
-        // by index — a closed window shifts every index after it, so "shortcut
+        // by index â€” a closed window shifts every index after it, so "shortcut
         // two means window one" stops being true the moment anything closes.
         if self.theme.show_shortcuts {
             for (row, top) in [SHORTCUT_TOP, SHORTCUT_SECOND_TOP].iter().enumerate() {
@@ -1054,7 +1169,7 @@ impl Desktop {
         // A fresh press: find the topmost window whose title bar was hit.
         //
         // Checked from the top down so a window covering another takes the
-        // click, and the close button is tested before the drag — otherwise
+        // click, and the close button is tested before the drag â€” otherwise
         // pressing it would start a drag instead of closing anything.
         for index in (0..self.windows.len()).rev() {
             if self.windows[index].contains_close(x, y) {
@@ -1067,6 +1182,16 @@ impl Desktop {
                 self.invalidate_all();
                 return;
             }
+
+            // A click in the body of the Settings window works a control.
+            // Checked after the title bar so dragging still wins there.
+            if self.windows[index].kind == Kind::Settings
+                && self.windows[index].contains_body(x, y)
+            {
+                self.focused = index;
+                self.click_settings(index, x, y);
+                return;
+            }
         }
     }
 }
@@ -1077,7 +1202,7 @@ impl Desktop {
 /// Window text is wrapped rather than truncated because a window is a page,
 /// not a label: cutting a sentence off at the frame loses the half that
 /// mattered, whereas a panel button has nowhere to put a second line.
-/// A word longer than the whole line is broken mid-word — there is no better
+/// A word longer than the whole line is broken mid-word â€” there is no better
 /// answer, and refusing to break it would put pixels outside the window.
 fn wrap(text: &str, columns: usize) -> Vec<&str> {
     let mut pieces = Vec::new();
@@ -1111,7 +1236,7 @@ fn wrap(text: &str, columns: usize) -> Vec<&str> {
 pub static DESKTOP: Mutex<Option<Desktop>> = Mutex::new(None);
 
 /// Set when something has painted over the framebuffer behind the compositor's
-/// back — in practice `println!`, which writes to the text console directly.
+/// back â€” in practice `println!`, which writes to the text console directly.
 ///
 /// Before damage tracking, a stray kernel message was erased by the next
 /// full-screen repaint. Now that only changed pixels reach the screen, it would
@@ -1132,3 +1257,4 @@ pub fn with<T>(body: impl FnOnce(&mut Desktop) -> T) -> Option<T> {
 pub fn active() -> bool {
     x86_64::instructions::interrupts::without_interrupts(|| DESKTOP.lock().is_some())
 }
+
