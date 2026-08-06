@@ -1,4 +1,4 @@
-//! Kestrel — a small x86-64 kernel booted by Limine.
+﻿//! Kestrel â€” a small x86-64 kernel booted by Limine.
 
 #![no_std]
 #![no_main]
@@ -38,6 +38,7 @@ mod smp;
 mod syscall;
 mod task;
 mod terminal;
+mod theme;
 mod usermode;
 mod vfs;
 
@@ -54,6 +55,10 @@ use crate::serial::SERIAL;
 /// there is exactly one place to bump it. The banner, the `version` command
 /// and the release script all read it from here.
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"), " beta");
+
+/// A name for this release, so it is something to talk about rather than a
+/// number to look up. This one is about making the desktop the user's own.
+pub const CODENAME: &str = "More Quality";
 
 /// Limine only scans for requests between these two markers, which lets the
 /// linker place everything else freely.
@@ -163,6 +168,16 @@ pub extern "C" fn kmain() -> ! {
     println!("ramdisk      : mounted at /");
 
     load_modules();
+
+    // After the disk, since that is where settings live, and before the shell,
+    // so the desktop is already the user's own the first time it is opened.
+    if let Some(skipped) = theme::load_from_disk() {
+        println!("theme        : loaded from {}", theme::CONFIG_PATH);
+        for complaint in skipped {
+            println!("             : {complaint}");
+        }
+    }
+
     start_network();
 
     println!();
@@ -214,8 +229,8 @@ fn start_network() {
             let (ip, gateway) = net::config(|c| (c.ip, c.gateway)).unwrap();
             println!("address      : {ip}, gateway {gateway}");
 
-            // Nothing can be sent before the link is up — the card simply
-            // never completes the descriptor — so wait for it rather than
+            // Nothing can be sent before the link is up â€” the card simply
+            // never completes the descriptor â€” so wait for it rather than
             // firing the first frame into a cable that is not plugged in yet.
             match net::e1000::await_link() {
                 Some(0) => {}
@@ -505,3 +520,4 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     halt()
 }
+

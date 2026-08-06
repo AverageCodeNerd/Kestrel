@@ -11,64 +11,91 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::font::{self, GLYPH_HEIGHT, GLYPH_WIDTH};
+use crate::font;
+use crate::theme::{Theme, Wallpaper};
 
-// A compact, Breeze-inspired palette.  The experimental desktop deliberately
-// keeps its own palette so the kernel console can remain a separate surface.
-const DESKTOP_TOP: u32 = 0x2B6B9A;
-const DESKTOP_BOTTOM: u32 = 0x15324B;
-const WINDOW_BODY: u32 = 0xF4F6F8;
-const WINDOW_BORDER: u32 = 0x6A7785;
-const TITLE_ACTIVE: u32 = 0x3C8DBC;
-const TITLE_INACTIVE: u32 = 0x6B7886;
-const PANEL: u32 = 0x18232E;
-const PANEL_EDGE: u32 = 0x405363;
-const LAUNCHER: u32 = 0x263746;
-const LAUNCHER_SELECTED: u32 = 0x3C8DBC;
-const TEXT: u32 = 0x18232E;
-const TEXT_DIM: u32 = 0x65717D;
-const LIGHT_TEXT: u32 = 0xF4F6F8;
-const CURSOR: u32 = 0xFFFFFF;
-const CURSOR_EDGE: u32 = 0x101828;
-
-/// Height of a window's title bar, in pixels.
-const TITLE_HEIGHT: usize = 20;
-const PANEL_HEIGHT: usize = 30;
-/// Wide enough for the longest entry name at the current font size, rather
-/// than clipping them.
-const LAUNCHER_WIDTH: usize = 320;
+/// Fixed layout, in pixels, that nothing gains from making configurable.
 const LAUNCHER_X: isize = 6;
-/// Each row holds two lines of text, so it must be taller than two cells.
-const LAUNCHER_ROW_HEIGHT: usize = 40;
-const LAUNCHER_ROW_STEP: isize = 46;
-/// Space above the first row, taken by the heading.
-const LAUNCHER_HEADER: isize = 34;
-const LAUNCHER_ENTRIES: usize = 2;
-const LAUNCHER_HEIGHT: usize =
-    LAUNCHER_HEADER as usize + LAUNCHER_ENTRIES * LAUNCHER_ROW_STEP as usize + 6;
-/// Sized to hold an eight-character name plus its padding, so the common
-/// window titles are not abbreviated in the panel.
-const TASK_WIDTH: usize = 8 * CELL_W + 14;
-const TASK_STEP: isize = TASK_WIDTH as isize + 6;
-/// The launcher button, sized to actually fit its label rather than clipping
-/// the product name.
 const LAUNCHER_BUTTON_X: isize = 6;
-const LAUNCHER_BUTTON_WIDTH: usize = 124;
-/// Where the task buttons begin, clear of the launcher button.
-const TASK_STRIP_X: isize = 138;
-/// Text is drawn at double the font size, as in the console.
-const SCALE: usize = 2;
-const CELL_W: usize = GLYPH_WIDTH * SCALE;
-const CELL_H: usize = (GLYPH_HEIGHT + 1) * SCALE;
+const LAUNCHER_ENTRIES: usize = 2;
 
-/// Desktop shortcuts: a square icon with two lines of text beside it. The
-/// label is sized in whole characters so the hit test and the drawing agree.
+/// Desktop shortcuts: a square icon with two lines of text beside it.
 const SHORTCUT_X: isize = 18;
 const SHORTCUT_TOP: isize = 20;
 const SHORTCUT_SECOND_TOP: isize = 98;
 const SHORTCUT_ICON: usize = 48;
 const SHORTCUT_LABEL_X: isize = 58;
-const SHORTCUT_LABEL_WIDTH: usize = 8 * CELL_W;
+
+/// Layout derived from the theme.
+///
+/// Everything that measures itself in characters has to be recomputed when the
+/// text scale changes, so it is worked out once per theme change rather than
+/// being const. Keeping it in one struct is what stops the drawing code and
+/// the hit tests drifting apart — the bug this file has produced most often.
+#[derive(Clone, Copy)]
+struct Metrics {
+    cell_w: usize,
+    cell_h: usize,
+    title_height: usize,
+    panel_height: usize,
+    panel_at_top: bool,
+    border: usize,
+
+    task_width: usize,
+    task_step: isize,
+    task_strip_x: isize,
+    launcher_button_width: usize,
+
+    launcher_width: usize,
+    launcher_row_height: usize,
+    launcher_row_step: isize,
+    launcher_header: isize,
+    launcher_height: usize,
+
+    shortcut_label_width: usize,
+}
+
+impl Metrics {
+    fn from(theme: &Theme) -> Self {
+        let cell_w = theme.cell_width();
+        let cell_h = theme.cell_height();
+
+        // Wide enough for an eight-character name plus padding, so the common
+        // window titles are not abbreviated in the panel.
+        let task_width = 8 * cell_w + 14;
+        // Sized to actually fit "Kestrel" rather than clipping the name.
+        let launcher_button_width = 7 * cell_w + 12;
+
+        let launcher_row_height = 2 * cell_h + 4;
+        let launcher_row_step = launcher_row_height as isize + 6;
+        let launcher_header = cell_h as isize + 16;
+
+        Self {
+            cell_w,
+            cell_h,
+            title_height: theme.title_height,
+            panel_height: theme.panel_height,
+            panel_at_top: theme.panel_at_top,
+            border: theme.window_border_width,
+
+            task_width,
+            task_step: task_width as isize + 6,
+            task_strip_x: LAUNCHER_BUTTON_X + launcher_button_width as isize + 8,
+            launcher_button_width,
+
+            // Holds the longest entry name at the current scale.
+            launcher_width: 20 * cell_w,
+            launcher_row_height,
+            launcher_row_step,
+            launcher_header,
+            launcher_height: launcher_header as usize
+                + LAUNCHER_ENTRIES * launcher_row_step as usize
+                + 6,
+
+            shortcut_label_width: 8 * cell_w,
+        }
+    }
+}
 
 /// A rectangle that has changed since the last presentation.  The compositor
 /// redraws every layer through this clip, so overlapping windows are still
@@ -89,10 +116,16 @@ pub struct Window {
     pub height: usize,
     /// Text content, one entry per line.
     pub lines: Vec<String>,
+    /// Copied from the theme rather than looked up, so `rows` and `push` keep
+    /// signatures the shell can call without knowing about theming. The
+    /// compositor refreshes these whenever the theme changes.
+    title_height: usize,
+    cell_height: usize,
 }
 
 impl Window {
     pub fn new(title: &str, x: isize, y: isize, width: usize, height: usize) -> Self {
+        let theme = crate::theme::current();
         Self {
             title: String::from(title),
             x,
@@ -100,12 +133,18 @@ impl Window {
             width,
             height,
             lines: Vec::new(),
+            title_height: theme.title_height,
+            cell_height: theme.cell_height(),
         }
     }
 
     /// How many text rows fit inside this window.
     pub fn rows(&self) -> usize {
-        self.height.saturating_sub(TITLE_HEIGHT + 8) / CELL_H
+        self.height
+            .saturating_sub(self.title_height + 8)
+            .checked_div(self.cell_height)
+            .unwrap_or(0)
+            .max(1)
     }
 
     pub fn push(&mut self, line: &str) {
@@ -121,7 +160,7 @@ impl Window {
         x >= self.x
             && x < self.x + self.width as isize
             && y >= self.y
-            && y < self.y + TITLE_HEIGHT as isize
+            && y < self.y + self.title_height as isize
     }
 }
 
@@ -153,6 +192,10 @@ pub struct Desktop {
     damage: Option<Damage>,
     /// Active only while drawing a damaged region.
     clip: Option<Damage>,
+    /// The appearance in force, copied so drawing never locks.
+    theme: Theme,
+    /// Layout derived from `theme`, recomputed only when it changes.
+    m: Metrics,
 }
 
 // The framebuffer is a fixed region owned by this struct.
@@ -166,6 +209,8 @@ impl Desktop {
         let width = fb.width as usize;
         let height = fb.height as usize;
         let (cursor_x, cursor_y) = crate::mouse::position();
+        let theme = crate::theme::current();
+        let m = Metrics::from(&theme);
 
         Self {
             buffer: vec![0; width * height],
@@ -191,11 +236,51 @@ impl Desktop {
                 height,
             }),
             clip: None,
+            theme,
+            m,
         }
     }
 
     pub fn size(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// Adopt a changed theme and repaint everything.
+    ///
+    /// The whole screen is invalidated because a theme change can move the
+    /// panel, resize every glyph and recolour every pixel at once — there is
+    /// no region small enough to be worth working out.
+    pub fn apply_theme(&mut self, theme: Theme) {
+        self.m = Metrics::from(&theme);
+
+        // Windows cache the two measurements they need, so they have to be
+        // told; otherwise their text keeps the old line spacing.
+        for window in &mut self.windows {
+            window.title_height = self.m.title_height;
+            window.cell_height = self.m.cell_h;
+        }
+
+        self.theme = theme;
+        self.invalidate_all();
+    }
+
+    /// Y coordinate of the panel's top edge.
+    fn panel_y(&self) -> isize {
+        if self.m.panel_at_top {
+            0
+        } else {
+            self.height.saturating_sub(self.m.panel_height) as isize
+        }
+    }
+
+    /// Y coordinate of the launcher's top edge, opening away from the panel.
+    fn launcher_y(&self) -> isize {
+        if self.m.panel_at_top {
+            self.m.panel_height as isize + 4
+        } else {
+            self.height
+                .saturating_sub(self.m.panel_height + 4 + self.m.launcher_height) as isize
+        }
     }
 
     fn plot(&mut self, x: usize, y: usize, colour: u32) {
@@ -296,29 +381,30 @@ impl Desktop {
     }
 
     fn launcher_region(&self) -> Option<Damage> {
-        let bottom = self.height.saturating_sub(PANEL_HEIGHT + 4);
         self.region(
             LAUNCHER_X,
-            bottom.saturating_sub(LAUNCHER_HEIGHT) as isize,
-            LAUNCHER_WIDTH,
-            LAUNCHER_HEIGHT,
+            self.launcher_y(),
+            self.m.launcher_width,
+            self.m.launcher_height,
         )
     }
 
     fn draw_text(&mut self, x: isize, y: isize, text: &str, colour: u32) {
+        let (cell_w, scale) = (self.m.cell_w, self.theme.scale);
+
         for (index, byte) in text.bytes().enumerate() {
             let glyph = font::glyph(byte);
-            let origin_x = x + (index * CELL_W) as isize;
+            let origin_x = x + (index * cell_w) as isize;
 
             for (row, bits) in glyph.iter().enumerate() {
-                for column in 0..GLYPH_WIDTH {
+                for column in 0..font::GLYPH_WIDTH {
                     if bits & (1 << column) == 0 {
                         continue;
                     }
-                    for sy in 0..SCALE {
-                        for sx in 0..SCALE {
-                            let px = origin_x + (column * SCALE + sx) as isize;
-                            let py = y + (row * SCALE + sy) as isize;
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let px = origin_x + (column * scale + sx) as isize;
+                            let py = y + (row * scale + sy) as isize;
                             if px >= 0 && py >= 0 {
                                 self.plot(px as usize, py as usize, colour);
                             }
@@ -342,25 +428,20 @@ impl Desktop {
         };
         self.clip = Some(damage);
 
-        // Background first, but only within the invalidated region.
-        for y in damage.y..damage.y + damage.height {
-            let t = y as f32 / self.height as f32;
-            let colour = logo::blend(DESKTOP_TOP, DESKTOP_BOTTOM, t);
-            for x in damage.x..damage.x + damage.width {
-                self.buffer[y * self.width + x] = colour;
-            }
-        }
+        self.draw_wallpaper(damage);
 
         // Desktop shortcuts make the otherwise static experimental shell feel
         // like a real workspace.  They are also mouse targets for the two
         // built-in applications.
-        self.draw_shortcut(SHORTCUT_X as usize, SHORTCUT_TOP as usize, "Terminal", "Shell");
-        self.draw_shortcut(
-            SHORTCUT_X as usize,
-            SHORTCUT_SECOND_TOP as usize,
-            "System",
-            "Monitor",
-        );
+        if self.theme.show_shortcuts {
+            self.draw_shortcut(SHORTCUT_X as usize, SHORTCUT_TOP as usize, "Terminal", "Shell");
+            self.draw_shortcut(
+                SHORTCUT_X as usize,
+                SHORTCUT_SECOND_TOP as usize,
+                "System",
+                "Monitor",
+            );
+        }
 
         // Back to front, so the focused window ends up on top.
         let order: Vec<usize> = (0..self.windows.len())
@@ -382,7 +463,52 @@ impl Desktop {
         self.clip = None;
     }
 
+    /// Paint the background within the damaged region.
+    ///
+    /// Written straight into the buffer rather than through `fill`, because
+    /// the colour changes per row (or per column) and this is the one layer
+    /// that always covers every damaged pixel.
+    fn draw_wallpaper(&mut self, damage: Damage) {
+        let (top, bottom) = (self.theme.desktop_top, self.theme.desktop_bottom);
+        let style = self.theme.wallpaper;
+
+        for y in damage.y..damage.y + damage.height {
+            let down = y as f32 / self.height.max(1) as f32;
+
+            for x in damage.x..damage.x + damage.width {
+                let colour = match style {
+                    Wallpaper::Solid => top,
+                    Wallpaper::Gradient => logo::blend(top, bottom, down),
+                    Wallpaper::Horizontal => {
+                        logo::blend(top, bottom, x as f32 / self.width.max(1) as f32)
+                    }
+                    Wallpaper::Grid => {
+                        let base = logo::blend(top, bottom, down);
+                        // A line every 48 pixels, lightened towards the top
+                        // colour so it reads on both dark and light themes.
+                        if x % 48 == 0 || y % 48 == 0 {
+                            logo::blend(base, 0xFFFFFF, 0.06)
+                        } else {
+                            base
+                        }
+                    }
+                };
+                self.buffer[y * self.width + x] = colour;
+            }
+        }
+    }
+
+    /// The Kestrel mark, drawn in the current theme's colours.
+    ///
+    /// `logo::part` gives the shape without committing to a palette, so the
+    /// falcon takes the theme rather than staying its own blue — an icon that
+    /// ignores the theme is the one thing that gives away a recoloured desktop
+    /// as a recolouring.
     fn draw_logo(&mut self, x: usize, y: usize, size: usize) {
+        let badge = self.theme.title_active;
+        let bird = self.theme.light_text;
+        let beak = self.theme.text_dim;
+
         for row in 0..size {
             for column in 0..size {
                 let u = column as f32 / size as f32;
@@ -390,7 +516,12 @@ impl Desktop {
                 if !logo::in_badge(u, v, 0.22) {
                     continue;
                 }
-                let colour = logo::colour(u, v);
+
+                let colour = match logo::part(u, v) {
+                    logo::Part::Backdrop => badge,
+                    logo::Part::Beak => beak,
+                    _ => bird,
+                };
                 self.plot(x + column, y + row, colour);
             }
         }
@@ -402,7 +533,7 @@ impl Desktop {
     /// and unbounded text simply runs past it and over whatever is next. The
     /// truncation is marked so a clipped label is not mistaken for the name.
     fn draw_text_within(&mut self, x: isize, y: isize, text: &str, colour: u32, max_width: usize) {
-        let fits = max_width / CELL_W;
+        let fits = max_width / self.m.cell_w.max(1);
         if fits == 0 {
             return;
         }
@@ -418,18 +549,25 @@ impl Desktop {
     }
 
     fn draw_shortcut(&mut self, x: usize, y: usize, name: &str, detail: &str) {
-        self.fill(x as isize, y as isize, SHORTCUT_ICON, SHORTCUT_ICON, 0xD7E6F2);
+        let (light, accent) = (self.theme.light_text, self.theme.title_active);
+        // The labels sit on the wallpaper, not on the icon, so they follow the
+        // desktop's text colour rather than the icon's.
+        let label = self.theme.desktop_text;
+        let label_width = self.m.shortcut_label_width;
+
+        self.fill(x as isize, y as isize, SHORTCUT_ICON, SHORTCUT_ICON, light);
         self.fill(
             x as isize + 3,
             y as isize + 3,
             SHORTCUT_ICON - 6,
             SHORTCUT_ICON - 6,
-            TITLE_ACTIVE,
+            accent,
         );
         self.draw_logo(x + 10, y + 8, 28);
+
         let label_x = x as isize + SHORTCUT_LABEL_X;
-        self.draw_text_within(label_x, y as isize + 5, name, LIGHT_TEXT, SHORTCUT_LABEL_WIDTH);
-        self.draw_text_within(label_x, y as isize + 27, detail, 0xC7D9E8, SHORTCUT_LABEL_WIDTH);
+        self.draw_text_within(label_x, y as isize + 5, name, label, label_width);
+        self.draw_text_within(label_x, y as isize + 27, detail, label, label_width);
     }
 
     /// Whether `(x, y)` is inside the shortcut whose icon starts at `top`.
@@ -439,90 +577,107 @@ impl Desktop {
     /// drawn rather than guessed, which is how it came to stop short of it.
     fn in_shortcut(&self, x: isize, y: isize, top: isize) -> bool {
         x >= SHORTCUT_X
-            && x < SHORTCUT_X + SHORTCUT_LABEL_X + SHORTCUT_LABEL_WIDTH as isize
+            && x < SHORTCUT_X + SHORTCUT_LABEL_X + self.m.shortcut_label_width as isize
             && y >= top
             && y < top + SHORTCUT_ICON as isize
     }
 
     fn draw_panel(&mut self) {
-        let y = self.height.saturating_sub(PANEL_HEIGHT) as isize;
-        self.fill(0, y, self.width, PANEL_HEIGHT, PANEL);
-        self.fill(0, y, self.width, 1, PANEL_EDGE);
+        let y = self.panel_y();
+        let (panel, edge) = (self.theme.panel, self.theme.panel_edge);
+        let (light, accent) = (self.theme.panel_text, self.theme.title_active);
+        let height = self.m.panel_height;
+        // Text sits one line in from the top of the bar, centred by eye.
+        let text_y = y + (height as isize - self.m.cell_h as isize) / 2;
+        let box_height = height.saturating_sub(8);
 
-        // Launcher button, task strip, and a small static status area.  A
-        // clock needs a time service; until that exists this names the build.
+        self.fill(0, y, self.width, height, panel);
+        // The rule goes along whichever edge faces the rest of the screen.
+        let rule_y = if self.m.panel_at_top { y + height as isize - 1 } else { y };
+        self.fill(0, rule_y, self.width, 1, edge);
+
+        // Launcher button, task strip, and a small status area.  A clock needs
+        // a time service; until that exists this says whatever the user wants.
         self.fill(
             LAUNCHER_BUTTON_X,
             y + 4,
-            LAUNCHER_BUTTON_WIDTH,
-            PANEL_HEIGHT - 8,
-            TITLE_ACTIVE,
+            self.m.launcher_button_width,
+            box_height,
+            accent,
         );
         self.draw_text_within(
             LAUNCHER_BUTTON_X + 8,
-            y + 7,
+            text_y,
             "Kestrel",
-            LIGHT_TEXT,
-            LAUNCHER_BUTTON_WIDTH - 12,
+            light,
+            self.m.launcher_button_width - 12,
         );
 
-        let mut x = TASK_STRIP_X;
+        let mut x = self.m.task_strip_x;
         let titles: Vec<String> = self.windows.iter().map(|window| window.title.clone()).collect();
         for (index, title) in titles.iter().enumerate() {
-            let colour = if index == self.focused { 0x3A5266 } else { 0x263746 };
-            self.fill(x, y + 4, TASK_WIDTH, PANEL_HEIGHT - 8, colour);
+            let colour = if index == self.focused {
+                self.theme.launcher_selected
+            } else {
+                self.theme.launcher
+            };
+            self.fill(x, y + 4, self.m.task_width, box_height, colour);
             // The panel is intentionally compact.  A window's first word is
             // readable here while its full title remains in the title bar.
             let label = title.split_whitespace().next().unwrap_or(title);
-            self.draw_text_within(x + 7, y + 7, label, LIGHT_TEXT, TASK_WIDTH - 14);
-            x += TASK_STEP;
+            self.draw_text_within(x + 7, text_y, label, light, self.m.task_width - 14);
+            x += self.m.task_step;
         }
 
         // Right-aligned from its actual width, so it cannot run off the edge.
-        const STATUS: &str = "Experimental OS";
-        let status_width = STATUS.len() * CELL_W;
-        if self.width > status_width + 24 {
-            let status_x = (self.width - status_width - 12) as isize;
-            // Never let it collide with the last task button.
-            if status_x > x + 8 {
-                self.draw_text(status_x, y + 7, STATUS, 0xC7D9E8);
+        if self.theme.show_status {
+            let status = self.theme.status_text.clone();
+            let status_width = status.chars().count() * self.m.cell_w;
+            if self.width > status_width + 24 {
+                let status_x = (self.width - status_width - 12) as isize;
+                // Never let it collide with the last task button.
+                if status_x > x + 8 {
+                    self.draw_text(status_x, text_y, &status, light);
+                }
             }
         }
     }
 
     fn draw_launcher(&mut self) {
-        let bottom = self.height.saturating_sub(PANEL_HEIGHT + 4);
-        let y = bottom.saturating_sub(LAUNCHER_HEIGHT) as isize;
-        self.fill(LAUNCHER_X, y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, LAUNCHER);
-        self.fill(LAUNCHER_X, y, LAUNCHER_WIDTH, 1, 0x82B9D8);
+        let y = self.launcher_y();
+        let (width, height) = (self.m.launcher_width, self.m.launcher_height);
+        let light = self.theme.light_text;
+
+        self.fill(LAUNCHER_X, y, width, height, self.theme.launcher);
+        self.fill(LAUNCHER_X, y, width, 1, self.theme.panel_edge);
         // Closing the launcher only invalidates the launcher's own rectangle,
         // so nothing here may be drawn beyond it either.
-        self.draw_text_within(
-            LAUNCHER_X + 12,
-            y + 10,
-            "Applications",
-            LIGHT_TEXT,
-            LAUNCHER_WIDTH - 24,
-        );
+        self.draw_text_within(LAUNCHER_X + 12, y + 10, "Applications", light, width - 24);
 
         let entries = [
             ("Terminal", "The Kestrel shell"),
             ("System Monitor", "Hardware overview"),
         ];
         let row_x = LAUNCHER_X + 6;
-        let row_width = LAUNCHER_WIDTH - 12;
+        let row_width = width - 12;
         let text_width = row_width - 20;
 
         for (index, (name, description)) in entries.iter().enumerate() {
-            let row_y = y + LAUNCHER_HEADER + index as isize * LAUNCHER_ROW_STEP;
-            self.fill(row_x, row_y, row_width, LAUNCHER_ROW_HEIGHT, LAUNCHER_SELECTED);
-            // Two cells apart, so the description clears the name.
-            self.draw_text_within(row_x + 10, row_y + 4, name, LIGHT_TEXT, text_width);
+            let row_y = y + self.m.launcher_header + index as isize * self.m.launcher_row_step;
+            self.fill(
+                row_x,
+                row_y,
+                row_width,
+                self.m.launcher_row_height,
+                self.theme.launcher_selected,
+            );
+            // One cell apart, so the description clears the name.
+            self.draw_text_within(row_x + 10, row_y + 4, name, light, text_width);
             self.draw_text_within(
                 row_x + 10,
-                row_y + 4 + CELL_H as isize,
+                row_y + 4 + self.m.cell_h as isize,
                 description,
-                0xD7E6F2,
+                light,
                 text_width,
             );
         }
@@ -540,37 +695,60 @@ impl Desktop {
             )
         };
 
-        // Border, then body inset by one pixel.
-        self.fill(x, y, width, height, WINDOW_BORDER);
+        let title_height = self.m.title_height;
+        let border = self.m.border;
+        let inset = border as isize;
+
+        // Border, then body inset by the border width.
+        self.fill(x, y, width, height, self.theme.window_border);
         self.fill(
-            x + 1,
-            y + TITLE_HEIGHT as isize,
-            width.saturating_sub(2),
-            height.saturating_sub(TITLE_HEIGHT + 1),
-            WINDOW_BODY,
+            x + inset,
+            y + title_height as isize,
+            width.saturating_sub(border * 2),
+            height.saturating_sub(title_height + border),
+            self.theme.window_body,
         );
 
-        let title_colour = if focused { TITLE_ACTIVE } else { TITLE_INACTIVE };
-        self.fill(x + 1, y + 1, width.saturating_sub(2), TITLE_HEIGHT - 1, title_colour);
+        let title_colour = if focused {
+            self.theme.title_active
+        } else {
+            self.theme.title_inactive
+        };
+        self.fill(
+            x + inset,
+            y + inset,
+            width.saturating_sub(border * 2),
+            title_height.saturating_sub(border),
+            title_colour,
+        );
 
+        // Centred in the title bar, so it stays put as the bar is resized.
+        let title_y = y + (title_height as isize - self.m.cell_h as isize) / 2;
         let title = self.windows[index].title.clone();
-        self.draw_text_within(x + 8, y + 3, &title, LIGHT_TEXT, width.saturating_sub(16));
+        self.draw_text_within(
+            x + 8,
+            title_y,
+            &title,
+            self.theme.light_text,
+            width.saturating_sub(16),
+        );
 
         // Wrapped to the window's interior, then clipped to it as a backstop.
         //
         // Nothing may be drawn outside the window's own rectangle: a drag
         // invalidates the rectangle it left and the one it moved to, so pixels
         // beyond that are never erased and smear across the desktop.
-        let colour = if focused { TEXT } else { TEXT_DIM };
+        let colour = if focused { self.theme.text } else { self.theme.text_dim };
         let interior = width.saturating_sub(16);
-        let columns = interior / CELL_W;
+        let columns = interior / self.m.cell_w.max(1);
+        let cell_h = self.m.cell_h;
         let lines = self.windows[index].lines.clone();
 
         let mut row = 0;
         'lines: for line in lines.iter() {
             for piece in wrap(line, columns) {
-                let py = y + (TITLE_HEIGHT + 4 + row * CELL_H) as isize;
-                if py + CELL_H as isize > y + height as isize {
+                let py = y + (title_height + 4 + row * cell_h) as isize;
+                if py + cell_h as isize > y + height as isize {
                     break 'lines;
                 }
                 self.draw_text_within(x + 8, py, piece, colour, interior);
@@ -608,8 +786,8 @@ impl Desktop {
         for (row, line) in ARROW.iter().enumerate() {
             for (column, glyph) in line.bytes().enumerate() {
                 let colour = match glyph {
-                    b'#' => CURSOR_EDGE,
-                    b'*' => CURSOR,
+                    b'#' => self.theme.cursor_edge,
+                    b'*' => self.theme.cursor,
                     _ => continue,
                 };
                 let x = mx + column as isize;
@@ -698,20 +876,23 @@ impl Desktop {
         }
         self.left_was_down = true;
 
-        let panel_y = self.height.saturating_sub(PANEL_HEIGHT) as isize;
-        if y >= panel_y {
-            if x >= LAUNCHER_BUTTON_X && x < LAUNCHER_BUTTON_X + LAUNCHER_BUTTON_WIDTH as isize {
+        let panel_y = self.panel_y();
+        let in_panel = y >= panel_y && y < panel_y + self.m.panel_height as isize;
+        if in_panel {
+            if x >= LAUNCHER_BUTTON_X
+                && x < LAUNCHER_BUTTON_X + self.m.launcher_button_width as isize
+            {
                 self.launcher_open = !self.launcher_open;
                 self.invalidate(self.launcher_region());
                 return;
             }
 
-            if x >= TASK_STRIP_X {
-                let offset = x - TASK_STRIP_X;
-                let index = (offset / TASK_STEP) as usize;
+            if x >= self.m.task_strip_x {
+                let offset = x - self.m.task_strip_x;
+                let index = (offset / self.m.task_step) as usize;
                 // The buttons are narrower than their spacing, so a click can
                 // land in the gap between two; that is not a click on either.
-                let within = offset % TASK_STEP < TASK_WIDTH as isize;
+                let within = offset % self.m.task_step < self.m.task_width as isize;
 
                 if within && index < self.windows.len() {
                     self.focused = index;
@@ -723,18 +904,16 @@ impl Desktop {
         }
 
         if self.launcher_open {
-            let launcher_y = self
-                .height
-                .saturating_sub(PANEL_HEIGHT + 4 + LAUNCHER_HEIGHT) as isize;
-            let inside_x =
-                x >= LAUNCHER_X && x < LAUNCHER_X + LAUNCHER_WIDTH as isize;
+            let launcher_y = self.launcher_y();
+            let inside_x = x >= LAUNCHER_X && x < LAUNCHER_X + self.m.launcher_width as isize;
 
-            if inside_x && y >= launcher_y + LAUNCHER_HEADER {
-                let offset = y - launcher_y - LAUNCHER_HEADER;
-                let index = (offset / LAUNCHER_ROW_STEP) as usize;
+            if inside_x && y >= launcher_y + self.m.launcher_header {
+                let offset = y - launcher_y - self.m.launcher_header;
+                let index = (offset / self.m.launcher_row_step) as usize;
                 // Rows are shorter than their spacing; a click in the gap
                 // between them selects neither.
-                let within = offset % LAUNCHER_ROW_STEP < LAUNCHER_ROW_HEIGHT as isize;
+                let within =
+                    offset % self.m.launcher_row_step < self.m.launcher_row_height as isize;
 
                 if within && index < self.windows.len() {
                     self.focused = index;

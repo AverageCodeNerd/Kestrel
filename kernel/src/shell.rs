@@ -246,6 +246,8 @@ impl Shell {
             "desktop" => self.desktop(),
             "net" => self.net(),
             "nic" => self.nic(),
+            "theme" => self.theme_command(&args),
+            "set" => self.set_command(&args),
             "arp" => self.arp(&args),
             "ping" => self.ping(&args),
             "fetch" => self.fetch(&args),
@@ -271,7 +273,11 @@ impl Shell {
 
     /// What this build is, and what a beta tester should expect of it.
     fn version(&self) {
-        println!("Kestrel {} — an experimental x86-64 operating system", crate::VERSION);
+        println!(
+            "Kestrel {} \"{}\" — an experimental x86-64 operating system",
+            crate::VERSION,
+            crate::CODENAME
+        );
         println!();
         println!("  built     {} profile", if cfg!(debug_assertions) { "debug" } else { "release" });
         println!("  cores     {} of {} online", cpu::online(), cpu::count());
@@ -301,6 +307,8 @@ impl Shell {
         println!("  cpus                list processor cores");
         println!("  net                 network interface status");
         println!("  nic                 network card registers, for diagnosis");
+        println!("  theme               show, preset, save, load or reset the look");
+        println!("  set <name> <value>  change one appearance setting");
         println!("  arp [ip]            show or request address resolution");
         println!("  kill <id>           stop a task");
         println!("  history             previously entered commands");
@@ -641,6 +649,94 @@ impl Shell {
 
         let link = crate::net::e1000::with(|nic| nic.link_up()).unwrap_or(false);
         println!("  link     : {}", if link { "up" } else { "down" });
+    }
+
+    /// Push the live theme at the compositor, if it is running.
+    ///
+    /// Changing a setting while the desktop is open repaints immediately;
+    /// changing it from the console simply takes effect next time. Either way
+    /// the caller does not have to care which it is.
+    fn refresh_desktop(&self) {
+        let theme = crate::theme::current();
+        crate::desktop::with(|desktop| desktop.apply_theme(theme));
+    }
+
+    fn theme_command(&self, args: &[&str]) {
+        match args.first().copied() {
+            // No argument: show everything, which doubles as the list of names
+            // `set` will accept.
+            None => {
+                for key in crate::theme::KEYS {
+                    if let Some(value) = crate::theme::current().get(key) {
+                        println!("  {key:<22} {value}");
+                    }
+                }
+                println!();
+                println!("  set <name> <value>   change one of these");
+                println!("  theme <preset>       {}", crate::theme::PRESETS.join(", "));
+                println!("  theme save / load    keep them across reboots");
+            }
+
+            Some("save") => match crate::theme::save_to_disk() {
+                Ok(()) => println!("saved to {}", crate::theme::CONFIG_PATH),
+                Err(e) => println!("theme: could not save: {e}"),
+            },
+
+            Some("load") => match crate::theme::load_from_disk() {
+                Some(skipped) => {
+                    for complaint in &skipped {
+                        println!("  {complaint}");
+                    }
+                    self.refresh_desktop();
+                    println!("loaded {}", crate::theme::CONFIG_PATH);
+                }
+                None => println!("theme: nothing saved at {}", crate::theme::CONFIG_PATH),
+            },
+
+            Some("reset") => {
+                crate::theme::replace(crate::theme::Theme::default());
+                self.refresh_desktop();
+                println!("back to the default look");
+            }
+
+            Some(name) => match crate::theme::preset(name) {
+                Some(theme) => {
+                    crate::theme::replace(theme);
+                    self.refresh_desktop();
+                    println!("{name} applied — 'theme save' to keep it");
+                }
+                None => println!(
+                    "theme: no preset called {name:?} (try {})",
+                    crate::theme::PRESETS.join(", ")
+                ),
+            },
+        }
+    }
+
+    fn set_command(&self, args: &[&str]) {
+        let Some(key) = args.first() else {
+            println!("usage: set <name> <value>   ('theme' lists the names)");
+            return;
+        };
+
+        // Everything after the name is the value, so status text can have
+        // spaces in it without needing quotes.
+        let value = args[1..].join(" ");
+        if value.is_empty() {
+            match crate::theme::current().get(key) {
+                Some(current) => println!("  {key} is {current}"),
+                None => println!("set: no such setting: {key}"),
+            }
+            return;
+        }
+
+        match crate::theme::with(|theme| theme.set(key, &value)) {
+            Ok(()) => {
+                self.refresh_desktop();
+                println!("  {key} = {value}");
+            }
+            Err(e) => println!("set: {e}"),
+        }
     }
 
     /// Dump the card's own view of itself.

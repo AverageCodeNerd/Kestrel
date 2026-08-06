@@ -39,6 +39,30 @@ Type `help` for the command list, `version` for what this build is, and
 Known limitations are listed under [Status](#status); the short version is that
 there is no TLS, so `fetch` reaches http:// but not https://.
 
+## Making it yours
+
+The desktop reads its appearance from a theme rather than from constants, so
+every colour and most of the layout can be changed from the shell and kept:
+
+```
+theme                       list every setting and its value
+theme amber                 default, midnight, paper, amber, matrix
+set panel.top on            move the panel to the top edge
+set scale 3                 bigger text — everything measured in
+                            characters resizes with it
+set desktop.top #204060     any #rrggbb, or a name like 'blue'
+set status.text Hello       the panel's corner text
+theme save                  keep it, at /disk/desktop.conf
+```
+
+Settings are loaded at boot, so the desktop is already yours the first time you
+open it. The file is plain `key = value` text and can be edited directly;
+unknown keys and bad values are reported and skipped rather than being allowed
+to stop the desktop starting.
+
+Saving needs a writable disk, so it works when booting the `.vhd` or `.img` but
+not from the ISO.
+
 ## What it looks like
 
 The shell, running inside a window on Kestrel's own compositor. Every command
