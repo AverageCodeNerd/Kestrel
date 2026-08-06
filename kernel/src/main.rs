@@ -214,6 +214,15 @@ fn start_network() {
             let (ip, gateway) = net::config(|c| (c.ip, c.gateway)).unwrap();
             println!("address      : {ip}, gateway {gateway}");
 
+            // Nothing can be sent before the link is up — the card simply
+            // never completes the descriptor — so wait for it rather than
+            // firing the first frame into a cable that is not plugged in yet.
+            match net::e1000::await_link() {
+                Some(0) => {}
+                Some(ms) => println!("link         : up after {ms} ms"),
+                None => println!("link         : down; the network will not work"),
+            }
+
             // Resolving the gateway both populates the cache and proves the
             // transmit path works: a reply can only come back if the request
             // actually left the card.

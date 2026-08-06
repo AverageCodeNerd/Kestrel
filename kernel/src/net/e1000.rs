@@ -99,6 +99,59 @@ struct TxDescriptor {
     special: u16,
 }
 
+/// A snapshot of the card's transmit-side state, for `nic` in the shell.
+pub struct Diagnostics {
+    pub status: u32,
+    pub ctrl: u32,
+    pub tctl: u32,
+    pub tdh: u32,
+    pub tdt: u32,
+    pub tdlen: u32,
+    pub rdh: u32,
+    pub rdt: u32,
+    pub last_descriptor: usize,
+    pub descriptor_status: u8,
+    pub descriptor_command: u8,
+    pub descriptor_length: u16,
+}
+
+impl Diagnostics {
+    pub fn link_up(&self) -> bool {
+        self.status & STATUS_LINK_UP != 0
+    }
+
+    pub fn full_duplex(&self) -> bool {
+        self.status & 1 != 0
+    }
+
+    /// STATUS bits 7:6, as megabits per second.
+    pub fn speed(&self) -> u32 {
+        match (self.status >> 6) & 0b11 {
+            0b00 => 10,
+            0b01 => 100,
+            _ => 1000,
+        }
+    }
+
+    /// Transmission paused by a received PAUSE frame.
+    pub fn transmit_paused(&self) -> bool {
+        self.status & (1 << 4) != 0
+    }
+
+    pub fn transmit_enabled(&self) -> bool {
+        self.tctl & TCTL_EN != 0
+    }
+
+    /// The card has consumed every descriptor the driver handed it.
+    pub fn ring_drained(&self) -> bool {
+        self.tdh == self.tdt
+    }
+
+    pub fn descriptor_done(&self) -> bool {
+        self.descriptor_status & STATUS_DD != 0
+    }
+}
+
 pub struct E1000 {
     registers: *mut u8,
     rx_ring: *mut RxDescriptor,
@@ -130,6 +183,33 @@ impl E1000 {
 
     pub fn link_up(&self) -> bool {
         self.read(REG_STATUS) & STATUS_LINK_UP != 0
+    }
+
+    /// Everything worth knowing when a transmit stalls.
+    ///
+    /// Read straight from the card rather than from anything this driver
+    /// believes, because the whole question is where the driver's model and
+    /// the hardware's disagree.
+    pub fn diagnostics(&self) -> Diagnostics {
+        // The descriptor the next transmit will use is `tx_next`; the one the
+        // last transmit used is the one before it.
+        let last = (self.tx_next + RING_SIZE - 1) % RING_SIZE;
+        let descriptor = unsafe { &*self.tx_ring.add(last) };
+
+        Diagnostics {
+            status: self.read(REG_STATUS),
+            ctrl: self.read(REG_CTRL),
+            tctl: self.read(REG_TCTL),
+            tdh: self.read(REG_TDH),
+            tdt: self.read(REG_TDT),
+            tdlen: self.read(REG_TDLEN),
+            rdh: self.read(REG_RDH),
+            rdt: self.read(REG_RDT),
+            last_descriptor: last,
+            descriptor_status: descriptor.status,
+            descriptor_command: descriptor.command,
+            descriptor_length: descriptor.length,
+        }
     }
 
     /// Send one frame. Blocks until the card reports the descriptor done.
@@ -326,6 +406,41 @@ pub fn init() -> Result<[u8; 6], &'static str> {
     let mac = nic.mac;
     *NIC.lock() = Some(nic);
     Ok(mac)
+}
+
+/// Milliseconds to allow the link to come up before giving up on it.
+///
+/// QEMU reports the link up the instant `CTRL.SLU` is set, so this costs
+/// nothing there. VirtualBox emulates a real PHY negotiating, which takes a
+/// moment — and an 82540 will not transmit without link, so the first frame
+/// after boot is silently dropped and the descriptor never completes. That is
+/// exactly what `arp: timed out transmitting` was.
+const LINK_TIMEOUT_MS: u64 = 4000;
+
+/// Wait for the link, returning how many milliseconds it took, or `None` if it
+/// never came up.
+///
+/// The timer is already running by the time the network starts, so this counts
+/// real time rather than spinning a made-up number of iterations.
+pub fn await_link() -> Option<u64> {
+    let tick_ms = 10; // the APIC timer is calibrated to 100 Hz
+    let start = crate::apic::ticks();
+
+    loop {
+        if with(|nic| nic.link_up()).unwrap_or(false) {
+            return Some((crate::apic::ticks() - start) * tick_ms);
+        }
+
+        let waited = (crate::apic::ticks() - start) * tick_ms;
+        if waited >= LINK_TIMEOUT_MS {
+            return None;
+        }
+
+        // Other tasks may not exist yet at boot, so this must not assume the
+        // scheduler will get us back; halting until the next timer interrupt
+        // keeps the wait cheap either way.
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Run `body` against the card.

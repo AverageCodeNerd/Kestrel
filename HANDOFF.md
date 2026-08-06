@@ -116,30 +116,35 @@ drag is live nothing else is hit-tested. Any new clickable region must go
 
 Ordered by how worthwhile they are to pick up.
 
-1. **Networking fails under VirtualBox.** `arp: timed out transmitting`; the
-   transmit descriptor never reports done. Works in QEMU. Adding the
-   datasheet's `TCTL` collision-threshold and collision-distance fields did not
-   fix it. Trace the descriptor status bit to see whether VirtualBox completes
-   it at all.
+1. **No TLS**, so https is unreachable; and `fetch` is a client, not a browser —
+   nothing parses or renders HTML.
 
-2. **The ISO does not boot on VirtualBox** — see "Running it in a VM". A beta
-   that ships only a VHD is a poor first impression, so this is a release
-   blocker rather than a nicety.
+2. **`kill` is blunt** — a task killed while holding a lock leaks it.
 
-3. **`kill` is blunt** — a task killed while holding a lock leaks it.
-
-4. **Only one terminal window.** The desktop's windows are fixed at entry;
+3. **Only one terminal window.** The desktop's windows are fixed at entry;
    there is no way to open a second one, and the launcher only focuses what
    already exists rather than spawning anything.
 
-5. **No task migration between cores.** Tasks are pinned at spawn. Migration
+4. **No task migration between cores.** Tasks are pinned at spawn. Migration
    needs the release-versus-save race solved (see below).
 
-6. **No TLS**, so https is unreachable; and `fetch` is a client, not a browser —
-   nothing parses or renders HTML.
-
-7. **No `fork`**; `exec` always creates a new process rather than replacing the
+5. **No `fork`**; `exec` always creates a new process rather than replacing the
    caller.
+
+### Wait for the link before transmitting
+
+`arp: timed out transmitting` at boot under VirtualBox looked for days like a
+broken transmit path, and it was not. An 82540 will not transmit while the link
+is down: the descriptor is simply never completed, which is indistinguishable
+from a driver bug. QEMU reports the link up the instant `CTRL.SLU` is set, so
+the race never appears there. **VirtualBox takes roughly one to one and a half
+seconds** to negotiate, and the boot-time ARP went out well inside that window.
+
+The lesson is the diagnosis, not the fix: the same command typed by hand a few
+seconds later always worked, and that fact was visible from the start. Reading
+the card's own registers (`nic` in the shell) rather than reasoning about the
+driver showed `tx ring drained` and `status 0x01 (done)` — the transmit path
+had been fine all along.
 
 ### The terminal window
 

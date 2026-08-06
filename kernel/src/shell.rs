@@ -245,6 +245,7 @@ impl Shell {
             "cpus" => self.cpus(),
             "desktop" => self.desktop(),
             "net" => self.net(),
+            "nic" => self.nic(),
             "arp" => self.arp(&args),
             "ping" => self.ping(&args),
             "fetch" => self.fetch(&args),
@@ -299,6 +300,7 @@ impl Shell {
         println!("  ps                  list tasks");
         println!("  cpus                list processor cores");
         println!("  net                 network interface status");
+        println!("  nic                 network card registers, for diagnosis");
         println!("  arp [ip]            show or request address resolution");
         println!("  kill <id>           stop a task");
         println!("  history             previously entered commands");
@@ -639,6 +641,49 @@ impl Shell {
 
         let link = crate::net::e1000::with(|nic| nic.link_up()).unwrap_or(false);
         println!("  link     : {}", if link { "up" } else { "down" });
+    }
+
+    /// Dump the card's own view of itself.
+    ///
+    /// Every value here is read back from the hardware rather than from what
+    /// the driver believes it wrote, because the question this answers is
+    /// precisely where those two disagree.
+    fn nic(&self) {
+        let Some(d) = crate::net::e1000::with(|nic| nic.diagnostics()) else {
+            println!("  no network card");
+            return;
+        };
+
+        println!("  link     : {}", if d.link_up() { "up" } else { "DOWN" });
+        println!(
+            "             {} Mb/s, {}{}",
+            d.speed(),
+            if d.full_duplex() { "full duplex" } else { "half duplex" },
+            if d.transmit_paused() { ", PAUSED by flow control" } else { "" }
+        );
+        println!("  status   : {:#010x}", d.status);
+        println!("  ctrl     : {:#010x}", d.ctrl);
+        println!(
+            "  tctl     : {:#010x} ({})",
+            d.tctl,
+            if d.transmit_enabled() { "enabled" } else { "DISABLED" }
+        );
+        println!(
+            "  tx ring  : head {} tail {} len {} ({})",
+            d.tdh,
+            d.tdt,
+            d.tdlen,
+            if d.ring_drained() { "drained" } else { "CARD IS BEHIND" }
+        );
+        println!("  rx ring  : head {} tail {}", d.rdh, d.rdt);
+        println!(
+            "  last tx  : descriptor {} cmd {:#04x} len {} status {:#04x} ({})",
+            d.last_descriptor,
+            d.descriptor_command,
+            d.descriptor_length,
+            d.descriptor_status,
+            if d.descriptor_done() { "done" } else { "NOT DONE" }
+        );
     }
 
     fn arp(&self, args: &[&str]) {

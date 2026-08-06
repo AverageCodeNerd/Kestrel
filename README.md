@@ -37,8 +37,7 @@ Type `help` for the command list, `version` for what this build is, and
 `desktop` for the windowed interface (Esc returns to the console).
 
 Known limitations are listed under [Status](#status); the short version is that
-networking does not work under VirtualBox, and there is no TLS, so `fetch`
-reaches http:// but not https://.
+there is no TLS, so `fetch` reaches http:// but not https://.
 
 ## What it looks like
 
@@ -404,9 +403,6 @@ bootable disk and disc images.
 
 Things a beta tester will actually run into, worst first:
 
-- **Networking does not work under VirtualBox.** The e1000 transmit descriptor
-  never reports completion, so `ping`, `resolve` and `fetch` fail with
-  `arp: timed out transmitting`. It works under QEMU. Unresolved.
 - **No TLS**, so `https://` is out of reach, and `fetch` is a client rather
   than a browser — nothing parses or renders HTML.
 - **Booting the ISO gives you no writable disk.** `/disk` only exists when

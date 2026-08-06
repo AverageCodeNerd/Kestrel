@@ -466,7 +466,6 @@
     <h2>What doesn't</h2>
     <p>Written plainly, because you will meet these:</p>
     <ul>
-      <li><strong>Networking does not work under VirtualBox.</strong> The e1000 transmit descriptor never reports completion, so <code>ping</code>, <code>resolve</code> and <code>fetch</code> time out. It works under QEMU. Unresolved.</li>
       <li><strong>No TLS</strong>, so <code>https://</code> is out of reach — and <code>fetch</code> is a client, not a browser. Nothing renders HTML.</li>
       <li><strong>The ISO gives you no writable disk.</strong> Boot the VHD or IMG if you want files to persist.</li>
       <li><strong>The keyboard does not work on Hyper-V.</strong> Generation 2 VMs have no PS/2 controller; use the serial console instead.</li>
