@@ -473,9 +473,46 @@ impl Shell {
 
         let program = path.rsplit('/').next().unwrap_or(&path).to_string();
 
-        match crate::process::spawn(&program, &image) {
-            Ok(id) => println!("exec: started task {id}"),
-            Err(e) => println!("exec: {path}: {}", e.as_str()),
+        let id = match crate::process::spawn(&program, &image) {
+            Ok(id) => id,
+            Err(e) => {
+                println!("exec: {path}: {}", e.as_str());
+                return;
+            }
+        };
+
+        self.wait_for(id);
+    }
+
+    /// Wait for a program to finish, leaving its input alone.
+    ///
+    /// This is what makes an interactive program possible at all. Without it
+    /// the shell keeps reading the keyboard while the program runs, and since
+    /// the shell is the one drawing a prompt, every keystroke meant for the
+    /// program is eaten by the shell and reported as an unknown command.
+    ///
+    /// A background form would need job control to hand the input back and
+    /// forth; a foreground-only shell needs only this.
+    fn wait_for(&self, id: u64) {
+        loop {
+            let outcome = x86_64::instructions::interrupts::without_interrupts(|| {
+                task::SCHEDULER.lock().outcome(id)
+            });
+
+            if let Some(code) = outcome {
+                // Silent on success, like a shell: a program that worked has
+                // already said whatever it had to say.
+                if code != 0 {
+                    println!("[exit {code}]");
+                }
+                return;
+            }
+
+            // Collect anything that has already finished, so a program that
+            // spawns nothing still lets the reaper run.
+            task::reap();
+            task::yield_now();
+            x86_64::instructions::hlt();
         }
     }
 

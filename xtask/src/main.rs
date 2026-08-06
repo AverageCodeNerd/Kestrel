@@ -165,7 +165,7 @@ fn build_kernel(opts: &Options) {
 }
 
 /// User programs shipped as bootloader modules.
-const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod"];
+const USER_PROGRAMS: &[&str] = &["hello", "fault", "selfmod", "edit"];
 
 /// Build the userspace programs.
 ///

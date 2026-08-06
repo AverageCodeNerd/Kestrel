@@ -272,6 +272,24 @@ impl Scheduler {
         }
     }
 
+    /// Whether a task is still alive, and its exit code once it is not.
+    ///
+    /// A task that cannot be found anywhere has already been reaped, which for
+    /// a caller waiting on it is indistinguishable from having just exited.
+    pub fn outcome(&self, id: u64) -> Option<u64> {
+        for queue in &self.queues {
+            for task in queue {
+                if task.id == id {
+                    return match task.state {
+                        State::Finished => Some(task.exit_code),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        Some(0)
+    }
+
     /// Next runnable task on this core, after the current one and wrapping.
     fn pick_next(&self, cpu: usize) -> Option<usize> {
         let queue = &self.queues[cpu];

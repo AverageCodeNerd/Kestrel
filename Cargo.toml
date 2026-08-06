@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "xtask", "user/hello", "user/fault", "user/selfmod", "logo"]
+members = ["kernel", "xtask", "user/kestrel", "user/hello", "user/fault", "user/selfmod", "user/edit", "logo"]
 default-members = ["xtask"]
+
 
 
 
