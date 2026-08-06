@@ -523,39 +523,15 @@ impl Shell {
         let mut desktop = unsafe { crate::desktop::Desktop::new(fb) };
         let (width, height) = desktop.size();
 
-        let mut shell_window = crate::desktop::Window::new(
-            "Welcome",
-            180,
-            66,
-            width * 6 / 10,
-            height / 2,
-        );
-        shell_window.title = String::from("Terminal");
-        desktop.windows.push(shell_window);
-
-        // Placed so it stays on screen: the right edge is measured back from
-        // the display, not extrapolated from the other window.
-        let system_width = width / 3;
-        let mut system = crate::desktop::Window::new(
-            "System Monitor",
-            (width - system_width - 60) as isize,
-            // Keep the status window clear of the welcome window while
-            // leaving room for the bottom panel on common resolutions.
-            (height * 2 / 3).saturating_sub(60) as isize,
-            system_width,
-            height / 3,
-        );
-        system.push(&alloc::format!("cores    {}", cpu::online()));
-        system.push(&alloc::format!(
-            "memory   {} MiB",
-            memory::usable_bytes() / (1024 * 1024)
-        ));
-        if let Some(ip) = crate::net::config(|c| c.ip) {
-            system.push(&alloc::format!("address  {ip}"));
+        for kind in crate::desktop::Kind::ALL {
+            let window = build_window(kind, width, height);
+            desktop.windows.push(window);
         }
-        desktop.windows.push(system);
 
-        let terminal_rows = desktop.windows[0].rows();
+        let terminal_rows = desktop
+            .find(crate::desktop::Kind::Terminal)
+            .map(|index| desktop.windows[index].rows())
+            .unwrap_or(24);
         *crate::desktop::DESKTOP.lock() = Some(desktop);
 
         // From here on, everything the shell prints is staged for the terminal
@@ -602,12 +578,22 @@ impl Shell {
             // long enough that polling once per frame misses short clicks and
             // makes dragging feel like it is snapping.
             crate::desktop::with(|desktop| {
+                // Serve anything the launcher asked to open. The compositor
+                // knows what was clicked; only the shell knows how to build it.
+                if let Some(kind) = desktop.take_open_request() {
+                    let window = build_window(kind, width, height);
+                    desktop.open(window);
+                }
+
                 if let Some(bytes) = output {
                     terminal.write(&bytes);
-                    if let Some(window) = desktop.windows.first_mut() {
-                        window.lines = terminal.visible(window.rows());
+                    // By role, not by index: closing a window shifts every
+                    // index after it, and the terminal is not always first.
+                    if let Some(index) = desktop.find(crate::desktop::Kind::Terminal) {
+                        let rows = desktop.windows[index].rows();
+                        desktop.windows[index].lines = terminal.visible(rows);
+                        desktop.invalidate_window(index);
                     }
-                    desktop.invalidate_window(0);
                 }
 
                 for _ in 0..8 {
@@ -914,6 +900,43 @@ impl Shell {
 }
 
 /// Parse dotted-quad notation.
+/// Build a window of the given kind, sized to the screen.
+///
+/// One place, used both when the desktop opens and when the launcher reopens
+/// something that was closed — so a reopened window is identical to the one
+/// that was there at the start rather than a second, subtly different version.
+fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crate::desktop::Window {
+    use crate::desktop::{Kind, Window};
+
+    match kind {
+        Kind::Terminal => Window::new(kind, 180, 66, width * 6 / 10, height / 2),
+
+        Kind::Monitor => {
+            // Placed so it stays on screen: the right edge is measured back
+            // from the display, not extrapolated from the other window.
+            let monitor_width = width / 3;
+            let mut window = Window::new(
+                kind,
+                (width - monitor_width - 60) as isize,
+                // Clear of the terminal, and above the panel on common sizes.
+                (height * 2 / 3).saturating_sub(60) as isize,
+                monitor_width,
+                height / 3,
+            );
+
+            window.push(&alloc::format!("cores    {}", cpu::online()));
+            window.push(&alloc::format!(
+                "memory   {} MiB",
+                memory::usable_bytes() / (1024 * 1024)
+            ));
+            if let Some(ip) = crate::net::config(|c| c.ip) {
+                window.push(&alloc::format!("address  {ip}"));
+            }
+            window
+        }
+    }
+}
+
 fn parse_ipv4(text: &str) -> Option<crate::net::Ipv4> {
     let mut octets = [0u8; 4];
     let mut parts = text.split('.');

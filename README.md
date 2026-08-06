@@ -434,8 +434,9 @@ Things a beta tester will actually run into, worst first:
   present and nothing survives a reboot.
 - **The keyboard does not work on Hyper-V.** Generation 2 VMs have no PS/2
   controller. Use the serial console — see above.
-- **One terminal window.** The desktop's windows are fixed when you enter it;
-  the launcher focuses what exists rather than opening anything new.
+- **One window of each kind.** Windows can be closed with the button on their
+  title bar and reopened from the launcher or the desktop shortcuts, but there
+  is no way to have two terminals at once.
 - **`kill` is blunt.** It stops a task from ever being scheduled again, so a
   task killed while holding a lock leaves that lock held forever. Good enough
   for stopping a runaway program, not a general mechanism.

@@ -108,7 +108,39 @@ struct Damage {
     height: usize,
 }
 
+/// What a window is for.
+///
+/// Windows are found by role rather than by position, because closing one
+/// shifts every index after it — and the terminal being "window 0" is exactly
+/// the assumption that would quietly send shell output into the System Monitor
+/// the first time somebody closed it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Terminal,
+    Monitor,
+}
+
+impl Kind {
+    /// The order the launcher lists them in.
+    pub const ALL: [Kind; 2] = [Kind::Terminal, Kind::Monitor];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Kind::Terminal => "Terminal",
+            Kind::Monitor => "System Monitor",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Kind::Terminal => "The Kestrel shell",
+            Kind::Monitor => "Hardware overview",
+        }
+    }
+}
+
 pub struct Window {
+    pub kind: Kind,
     pub title: String,
     pub x: isize,
     pub y: isize,
@@ -124,10 +156,11 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str, x: isize, y: isize, width: usize, height: usize) -> Self {
+    pub fn new(kind: Kind, x: isize, y: isize, width: usize, height: usize) -> Self {
         let theme = crate::theme::current();
         Self {
-            title: String::from(title),
+            kind,
+            title: String::from(kind.title()),
             x,
             y,
             width,
@@ -162,6 +195,22 @@ impl Window {
             && y >= self.y
             && y < self.y + self.title_height as isize
     }
+
+    /// The close button's square, at the right end of the title bar.
+    ///
+    /// Inset by two pixels so it does not sit flush against the frame, and
+    /// square so it stays proportionate as the title bar is resized.
+    fn close_button(&self) -> (isize, isize, usize) {
+        let size = self.title_height.saturating_sub(8).max(8);
+        let x = self.x + self.width as isize - size as isize - 4;
+        let y = self.y + (self.title_height as isize - size as isize) / 2;
+        (x, y, size)
+    }
+
+    fn contains_close(&self, x: isize, y: isize) -> bool {
+        let (bx, by, size) = self.close_button();
+        x >= bx && x < bx + size as isize && y >= by && y < by + size as isize
+    }
 }
 
 pub struct Desktop {
@@ -192,6 +241,8 @@ pub struct Desktop {
     damage: Option<Damage>,
     /// Active only while drawing a damaged region.
     clip: Option<Damage>,
+    /// A window the user clicked for in the launcher that is not open yet.
+    open_request: Option<Kind>,
     /// The appearance in force, copied so drawing never locks.
     theme: Theme,
     /// Layout derived from `theme`, recomputed only when it changes.
@@ -236,6 +287,7 @@ impl Desktop {
                 height,
             }),
             clip: None,
+            open_request: None,
             theme,
             m,
         }
@@ -261,6 +313,41 @@ impl Desktop {
         }
 
         self.theme = theme;
+        self.invalidate_all();
+    }
+
+    /// Where a window of this kind is, if it is open.
+    pub fn find(&self, kind: Kind) -> Option<usize> {
+        self.windows.iter().position(|window| window.kind == kind)
+    }
+
+    /// Close a window, keeping the focus somewhere sensible.
+    pub fn close(&mut self, index: usize) {
+        if index >= self.windows.len() {
+            return;
+        }
+        self.windows.remove(index);
+
+        // Every index after the removed one has shifted, including the one
+        // being dragged — simplest and safest is to drop the drag entirely.
+        self.dragging = None;
+        self.focused = self.focused.min(self.windows.len().saturating_sub(1));
+        self.invalidate_all();
+    }
+
+    /// A window the user asked for that does not exist yet.
+    ///
+    /// The compositor knows what was clicked but not how to build a window —
+    /// where it goes, how big it is, what is in it — so it records the request
+    /// and the shell services it on the next pass.
+    pub fn take_open_request(&mut self) -> Option<Kind> {
+        self.open_request.take()
+    }
+
+    /// Add a window and give it the focus, as opening something should.
+    pub fn open(&mut self, window: Window) {
+        self.windows.push(window);
+        self.focused = self.windows.len() - 1;
         self.invalidate_all();
     }
 
@@ -654,10 +741,12 @@ impl Desktop {
         // so nothing here may be drawn beyond it either.
         self.draw_text_within(LAUNCHER_X + 12, y + 10, "Applications", light, width - 24);
 
-        let entries = [
-            ("Terminal", "The Kestrel shell"),
-            ("System Monitor", "Hardware overview"),
-        ];
+        // Driven by `Kind::ALL`, so the rows and the click handling cannot
+        // disagree about which entry is which.
+        let entries: Vec<(&str, &str)> = Kind::ALL
+            .iter()
+            .map(|kind| (kind.title(), kind.description()))
+            .collect();
         let row_x = LAUNCHER_X + 6;
         let row_width = width - 12;
         let text_width = row_width - 20;
@@ -725,13 +814,21 @@ impl Desktop {
         // Centred in the title bar, so it stays put as the bar is resized.
         let title_y = y + (title_height as isize - self.m.cell_h as isize) / 2;
         let title = self.windows[index].title.clone();
-        self.draw_text_within(
-            x + 8,
-            title_y,
-            &title,
-            self.theme.light_text,
-            width.saturating_sub(16),
-        );
+        let (close_x, close_y, close_size) = self.windows[index].close_button();
+
+        // The title stops before the close button rather than running under it.
+        let title_room = (close_x - (x + 8)).max(0) as usize;
+        self.draw_text_within(x + 8, title_y, &title, self.theme.light_text, title_room);
+
+        // A cross, drawn as two diagonals rather than a glyph so it stays
+        // square and centred at any title-bar height.
+        let mark = self.theme.light_text;
+        self.fill(close_x, close_y, close_size, close_size, self.theme.window_border);
+        for step in 2..close_size.saturating_sub(2) {
+            let far = close_size - 1 - step;
+            self.plot((close_x + step as isize) as usize, (close_y + step as isize) as usize, mark);
+            self.plot((close_x + step as isize) as usize, (close_y + far as isize) as usize, mark);
+        }
 
         // Wrapped to the window's interior, then clipped to it as a backstop.
         //
@@ -909,14 +1006,22 @@ impl Desktop {
 
             if inside_x && y >= launcher_y + self.m.launcher_header {
                 let offset = y - launcher_y - self.m.launcher_header;
-                let index = (offset / self.m.launcher_row_step) as usize;
+                let row = (offset / self.m.launcher_row_step) as usize;
                 // Rows are shorter than their spacing; a click in the gap
                 // between them selects neither.
                 let within =
                     offset % self.m.launcher_row_step < self.m.launcher_row_height as isize;
 
-                if within && index < self.windows.len() {
-                    self.focused = index;
+                if within {
+                    if let Some(&kind) = Kind::ALL.get(row) {
+                        // Focus it if it is open, otherwise ask for it to be
+                        // opened — which is what makes closing a window
+                        // recoverable rather than permanent.
+                        match self.find(kind) {
+                            Some(index) => self.focused = index,
+                            None => self.open_request = Some(kind),
+                        }
+                    }
                 }
                 self.launcher_open = false;
                 self.invalidate_all();
@@ -926,20 +1031,36 @@ impl Desktop {
             self.invalidate(self.launcher_region());
         }
 
-        // The desktop shortcuts mirror the launcher entries.
-        if self.in_shortcut(x, y, SHORTCUT_TOP) && !self.windows.is_empty() {
-            self.focused = 0;
-            self.invalidate_all();
-            return;
-        }
-        if self.in_shortcut(x, y, SHORTCUT_SECOND_TOP) && self.windows.len() > 1 {
-            self.focused = 1;
-            self.invalidate_all();
-            return;
+        // The desktop shortcuts mirror the launcher entries, and behave the
+        // same way: focus what is open, open what is not. By kind rather than
+        // by index — a closed window shifts every index after it, so "shortcut
+        // two means window one" stops being true the moment anything closes.
+        if self.theme.show_shortcuts {
+            for (row, top) in [SHORTCUT_TOP, SHORTCUT_SECOND_TOP].iter().enumerate() {
+                if !self.in_shortcut(x, y, *top) {
+                    continue;
+                }
+                if let Some(&kind) = Kind::ALL.get(row) {
+                    match self.find(kind) {
+                        Some(index) => self.focused = index,
+                        None => self.open_request = Some(kind),
+                    }
+                    self.invalidate_all();
+                }
+                return;
+            }
         }
 
         // A fresh press: find the topmost window whose title bar was hit.
+        //
+        // Checked from the top down so a window covering another takes the
+        // click, and the close button is tested before the drag — otherwise
+        // pressing it would start a drag instead of closing anything.
         for index in (0..self.windows.len()).rev() {
+            if self.windows[index].contains_close(x, y) {
+                self.close(index);
+                return;
+            }
             if self.windows[index].contains_title(x, y) {
                 self.focused = index;
                 self.dragging = Some((index, x - self.windows[index].x, y - self.windows[index].y));
