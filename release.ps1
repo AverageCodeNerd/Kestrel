@@ -19,6 +19,22 @@ try {
     $version = $Matches[1]
     Write-Host "Building Kestrel v$version"
 
+    # The website carries the version in its badge, which nothing else checks.
+    # A stale badge is the sort of thing nobody notices until someone downloads
+    # the wrong thing, so refuse to build a release that disagrees with it.
+    #
+    # Keep this file ASCII-only. Windows PowerShell 5.1 reads a UTF-8 script
+    # with no BOM as CP1252, where an em dash ends in 0x94 - a curly quote -
+    # which unbalances the next string and reports itself as a missing brace
+    # two dozen lines away.
+    $site = "$root\docs\index.html"
+    if (Test-Path $site) {
+        $badge = Get-Content $site -Raw
+        if ($badge -notmatch [regex]::Escape("v$version beta")) {
+            throw "docs/index.html does not say 'v$version beta'; update the badge before releasing"
+        }
+    }
+
     # Always release-profile: the debug kernel is ~18x larger and takes about
     # half a minute to boot off an emulated CD.
     cargo xtask image --release
