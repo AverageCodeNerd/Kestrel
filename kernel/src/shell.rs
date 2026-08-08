@@ -1024,6 +1024,16 @@ impl Shell {
             if d.ring_drained() { "drained" } else { "CARD IS BEHIND" }
         );
         println!("  rx ring  : head {} tail {}", d.rdh, d.rdt);
+
+        // Answers whether the blocking transmit is what limits throughput.
+        let frames = crate::net::e1000::TX_FRAMES.load(Ordering::Relaxed);
+        let spins = crate::net::e1000::TX_SPINS.load(Ordering::Relaxed);
+        if frames > 0 {
+            println!(
+                "  tx wait  : {frames} frames, {spins} spins total, {} each",
+                spins / frames
+            );
+        }
         println!(
             "  last tx  : descriptor {} cmd {:#04x} len {} status {:#04x} ({})",
             d.last_descriptor,
@@ -1266,6 +1276,7 @@ fn spinner() {
 pub fn run() -> ! {
     Shell::new().run()
 }
+
 
 
 

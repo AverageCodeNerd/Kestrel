@@ -42,7 +42,9 @@ struct Options {
     cpus: u32,
     /// Capture the guest's network traffic to this pcap file.
     pcap: Option<PathBuf>,
-    /// Seconds to let the guest run before capturing and quitting.
+    /// Seconds to wait for the guest to boot **before** typing at it or
+    /// capturing. Not a limit on how long the guest may then take: raising it
+    /// delays the typing rather than allowing a slow command more time.
     timeout: u64,
 }
 
@@ -601,13 +603,31 @@ fn drive_serial(text: &str) -> std::io::Result<String> {
 
     std::thread::sleep(Duration::from_millis(500));
 
+    // Read until the guest has been quiet for a while, not until the first
+    // gap. Stopping at one 500 ms silence abandoned any command that thinks
+    // for longer than that — which made a slow download look like a hung
+    // kernel and cost a long and entirely wrong investigation into TCP
+    // throughput. The overall cap is what stops a genuinely hung guest from
+    // hanging the test too.
+    const QUIET: Duration = Duration::from_secs(20);
+    const CAP: Duration = Duration::from_secs(300);
+
+    let started = std::time::Instant::now();
+    let mut last_output = std::time::Instant::now();
     let mut output = Vec::new();
     let mut buffer = [0u8; 8192];
-    while let Ok(read) = stream.read(&mut buffer) {
-        if read == 0 {
-            break;
+
+    while started.elapsed() < CAP {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                output.extend_from_slice(&buffer[..read]);
+                last_output = std::time::Instant::now();
+            }
+            // A read timeout is silence, not an error.
+            Err(_) if last_output.elapsed() < QUIET => continue,
+            Err(_) => break,
         }
-        output.extend_from_slice(&buffer[..read]);
     }
 
     Ok(String::from_utf8_lossy(&output).into_owned())
@@ -699,6 +719,8 @@ fn wait_until_written(path: &Path) -> std::io::Result<()> {
         "screendump never completed",
     ))
 }
+
+
 
 
 

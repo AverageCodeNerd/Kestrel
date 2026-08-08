@@ -1,4 +1,4 @@
-//! Intel 8254x ("e1000") gigabit Ethernet driver.
+﻿//! Intel 8254x ("e1000") gigabit Ethernet driver.
 //!
 //! The card is a DMA master with two rings of descriptors: one for receive,
 //! one for transmit. Each descriptor points at a buffer by *physical* address,
@@ -9,7 +9,13 @@
 //! machine that talks to the network on demand.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+
+/// How long transmits spend waiting for the card, totalled. Reported by `nic`,
+/// to answer whether the blocking transmit is what limits throughput.
+pub static TX_SPINS: AtomicU64 = AtomicU64::new(0);
+pub static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 use crate::hhdm::phys_to_virt;
 use crate::{memory, pci};
@@ -223,21 +229,32 @@ impl E1000 {
         unsafe {
             core::ptr::copy_nonoverlapping(frame.as_ptr(), self.tx_buffers[index], frame.len());
 
+            // Volatile throughout. The card reads these by DMA and writes the
+            // status back the same way, so ordinary accesses let the compiler
+            // reorder them around the tail write below, or hoist the poll that
+            // waits for the result out of its own loop.
             let descriptor = self.tx_ring.add(index);
-            (*descriptor).length = frame.len() as u16;
+            core::ptr::addr_of_mut!((*descriptor).length).write_volatile(frame.len() as u16);
             // Ask the card to append the CRC and tell us when it is done.
-            (*descriptor).command = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
-            (*descriptor).status = 0;
+            core::ptr::addr_of_mut!((*descriptor).command)
+                .write_volatile(TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS);
+            core::ptr::addr_of_mut!((*descriptor).status).write_volatile(0);
         }
 
         self.tx_next = (index + 1) % RING_SIZE;
         // Advancing the tail is what hands the descriptor to the card.
         self.write(REG_TDT, self.tx_next as u32);
 
+        let mut spins = 0u64;
         for _ in 0..1_000_000 {
-            if unsafe { (*self.tx_ring.add(index)).status } & STATUS_DD != 0 {
+            let status =
+                unsafe { core::ptr::addr_of!((*self.tx_ring.add(index)).status).read_volatile() };
+            if status & STATUS_DD != 0 {
+                TX_SPINS.fetch_add(spins, Ordering::Relaxed);
+                TX_FRAMES.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
+            spins += 1;
             core::hint::spin_loop();
         }
 
@@ -249,11 +266,16 @@ impl E1000 {
         let index = self.rx_next;
         let descriptor = unsafe { &mut *self.rx_ring.add(index) };
 
-        if descriptor.status & STATUS_DD == 0 {
+        // Volatile for the same reason as the transmit side: the card writes
+        // this by DMA, and an ordinary read lets the compiler cache it across
+        // the polling loop that calls this.
+        let status =
+            unsafe { core::ptr::addr_of!((*self.rx_ring.add(index)).status).read_volatile() };
+        if status & STATUS_DD == 0 {
             return None;
         }
 
-        let frame = if descriptor.status & RX_STATUS_EOP != 0 && descriptor.errors == 0 {
+        let frame = if status & RX_STATUS_EOP != 0 && descriptor.errors == 0 {
             let length = descriptor.length as usize;
             let mut data = alloc::vec![0u8; length];
             unsafe {
@@ -266,7 +288,7 @@ impl E1000 {
         };
 
         // Hand the descriptor back to the card.
-        descriptor.status = 0;
+        unsafe { core::ptr::addr_of_mut!((*self.rx_ring.add(index)).status).write_volatile(0) };
         self.rx_next = (index + 1) % RING_SIZE;
         self.write(REG_RDT, index as u32);
 
@@ -412,7 +434,7 @@ pub fn init() -> Result<[u8; 6], &'static str> {
 ///
 /// QEMU reports the link up the instant `CTRL.SLU` is set, so this costs
 /// nothing there. VirtualBox emulates a real PHY negotiating, which takes a
-/// moment — and an 82540 will not transmit without link, so the first frame
+/// moment â€” and an 82540 will not transmit without link, so the first frame
 /// after boot is silently dropped and the descriptor never completes. That is
 /// exactly what `arp: timed out transmitting` was.
 const LINK_TIMEOUT_MS: u64 = 4000;
@@ -447,3 +469,4 @@ pub fn await_link() -> Option<u64> {
 pub fn with<T>(body: impl FnOnce(&mut E1000) -> T) -> Option<T> {
     x86_64::instructions::interrupts::without_interrupts(|| NIC.lock().as_mut().map(body))
 }
+

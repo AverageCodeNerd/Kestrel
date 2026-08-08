@@ -96,7 +96,13 @@ fn transmit(connection: &Connection, flags: u8, payload: &[u8]) -> Result<(), &'
 
 /// Open a connection and wait for the handshake to complete.
 pub fn connect(remote: Ipv4, port: u16, timeout_ms: u64) -> Result<(), &'static str> {
-    let local_port = 49152 + (crate::apic::ticks() as u16 % 4096);
+    // A counter, not the clock. The tick is 10 ms and several requests can
+    // finish inside one, so deriving the port from time hands consecutive
+    // connections the same one — and a peer that still has the previous
+    // four-tuple in TIME_WAIT quietly ignores the new SYN, which looks exactly
+    // like a hung download.
+    static NEXT_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+    let local_port = 49152 + (NEXT_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 4096);
     let mut connection = Connection::new(remote, port, local_port);
 
     connection.state = State::SynSent;
