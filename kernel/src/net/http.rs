@@ -15,24 +15,43 @@ pub struct Response {
     pub total: usize,
 }
 
-/// Split a URL into host and path. Only http:// is understood, since there is
-/// no TLS.
-pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
+/// Split a URL into host, port and path. Only http:// is understood, since
+/// there is no TLS.
+///
+/// The port matters more than it looks: an update server or anything else run
+/// locally is almost never on 80, and without this every such URL resolved the
+/// whole `host:port` as a name and timed out looking it up.
+pub fn split_url(url: &str) -> Result<(&str, u16, &str), &'static str> {
     let rest = url.strip_prefix("http://").unwrap_or(url);
 
     if rest.starts_with("https://") || url.starts_with("https://") {
         return Err("https needs TLS, which this stack does not have");
     }
 
-    Ok(match rest.find('/') {
+    let (authority, path) = match rest.find('/') {
         Some(slash) => (&rest[..slash], &rest[slash..]),
         None => (rest, "/"),
-    })
+    };
+
+    // Split on the last colon so this keeps working if a host form with
+    // colons in it ever turns up.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (
+            host,
+            port.parse().map_err(|_| "that is not a port number")?,
+        ),
+        None => (authority, 80),
+    };
+
+    if host.is_empty() {
+        return Err("the url has no host");
+    }
+    Ok((host, port, path))
 }
 
 /// Fetch a URL and return the response.
 pub fn get(url: &str, timeout_ms: u64) -> Result<Response, &'static str> {
-    let (host, path) = split_url(url)?;
+    let (host, port, path) = split_url(url)?;
 
     // A bare address skips the name server.
     let address = match parse_ipv4(host) {
@@ -40,12 +59,20 @@ pub fn get(url: &str, timeout_ms: u64) -> Result<Response, &'static str> {
         None => dns::resolve(host, timeout_ms)?,
     };
 
-    tcp::connect(address, 80, timeout_ms)?;
+    tcp::connect(address, port, timeout_ms)?;
+
+    // The Host header carries the port too when it is not the default, which
+    // is what name-based virtual hosts expect.
+    let authority = if port == 80 {
+        alloc::string::String::from(host)
+    } else {
+        alloc::format!("{host}:{port}")
+    };
 
     // HTTP/1.0 so the server closes when it is done, which is how the read
     // below knows the body is complete without parsing Content-Length.
     let request = alloc::format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: Kestrel\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: {authority}\r\nUser-Agent: Kestrel\r\nConnection: close\r\n\r\n"
     );
     tcp::send(request.as_bytes())?;
 

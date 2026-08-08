@@ -41,6 +41,7 @@ mod syscall;
 mod task;
 mod terminal;
 mod theme;
+mod update;
 mod usermode;
 mod vfs;
 
@@ -527,6 +528,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     halt()
 }
+
 
 
 

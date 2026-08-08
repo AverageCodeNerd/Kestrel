@@ -222,11 +222,30 @@ pub fn receive(source: Ipv4, segment: &[u8]) {
         }
 
         State::Established | State::FinWait => {
-            // Only in-order data is accepted; there is no reassembly queue.
-            if !payload.is_empty() && sequence == connection.receive_next {
-                connection.received.extend_from_slice(payload);
-                connection.receive_next =
-                    connection.receive_next.wrapping_add(payload.len() as u32);
+            // There is still no reassembly queue, so anything ahead of what we
+            // are expecting is dropped. What matters is that it is dropped
+            // *and acknowledged*: an unacknowledged segment makes the sender
+            // wait a full retransmission timeout, and with one segment per
+            // timeout a download crawls. Answering every data segment with our
+            // current position is a duplicate ACK, which tells the sender to
+            // resend immediately instead of waiting.
+            if !payload.is_empty() {
+                // A retransmission usually overlaps what we already have
+                // rather than matching it exactly. Taking the new tail out of
+                // it saves another round trip.
+                let already = connection.receive_next.wrapping_sub(sequence) as usize;
+
+                if already == 0 {
+                    connection.received.extend_from_slice(payload);
+                    connection.receive_next =
+                        connection.receive_next.wrapping_add(payload.len() as u32);
+                } else if already < payload.len() {
+                    let fresh = &payload[already..];
+                    connection.received.extend_from_slice(fresh);
+                    connection.receive_next =
+                        connection.receive_next.wrapping_add(fresh.len() as u32);
+                }
+
                 transmit(connection, ACK, &[]).ok();
             }
 

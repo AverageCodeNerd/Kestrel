@@ -257,6 +257,7 @@ impl Shell {
             "nic" => self.nic(),
             "open" => self.open_command(&args),
             "store" => self.store_command(&args),
+            "update" => self.update_command(&args),
             "theme" => self.theme_command(&args),
             "set" => self.set_command(&args),
             "arp" => self.arp(&args),
@@ -327,6 +328,7 @@ impl Shell {
         println!("  reboot / shutdown   stop the machine");
         println!("  spin                spawn a busy task, to show preemption");
         println!("  store               browse, install and remove programs");
+        println!("  update              replace the system with a newer one");
         println!("                      (/bin is in RAM, /disk is the real disk)");
         println!("  mem                 memory statistics");
         println!("  uptime              time since boot");
@@ -747,6 +749,81 @@ impl Shell {
     fn refresh_desktop(&self) {
         let theme = crate::theme::current();
         crate::desktop::with(|desktop| desktop.apply_theme(theme));
+    }
+
+    /// Replace the running system with a newer one.
+    fn update_command(&self, args: &[&str]) {
+        use crate::update;
+
+        match (args.first().copied(), args.get(1).copied()) {
+            (Some("from"), Some(url)) => match update::set_source(url) {
+                Ok(()) => println!("updates will come from {url}"),
+                Err(e) => println!("update: {e}"),
+            },
+
+            (Some("from"), None) => match update::source() {
+                Some(url) => println!("{url}"),
+                None => println!("no source set; use: update from http://host/path"),
+            },
+
+            (command @ (None | Some("install")), _) => {
+                let Some(base) = update::source() else {
+                    println!("no update source set.");
+                    println!("  update from http://host/path   where to look");
+                    println!("  update                         see what is there");
+                    println!("  update install                 take it");
+                    return;
+                };
+
+                println!("checking {base} ...");
+                let manifest = match update::check(&base) {
+                    Ok(manifest) => manifest,
+                    Err(e) => {
+                        println!("update: {e}");
+                        return;
+                    }
+                };
+
+                println!("  running   {}", update::running_version());
+                println!("  offered   {}", manifest.version);
+                println!(
+                    "  contents  a kernel of {} bytes and {} packages",
+                    manifest.kernel_size,
+                    manifest.packages.len()
+                );
+
+                if command.is_none() {
+                    if manifest.differs() {
+                        println!();
+                        println!("'update install' to take it");
+                    } else {
+                        println!();
+                        println!("that is what is already running");
+                    }
+                    return;
+                }
+
+                println!();
+                println!("downloading; nothing is written until it has all arrived");
+
+                match update::apply(&base, &manifest) {
+                    Ok(report) => {
+                        println!(
+                            "installed {} - a kernel of {} bytes and {} packages",
+                            report.version, report.kernel_bytes, report.packages
+                        );
+                        println!("reboot to start it. the previous kernel is kept, and the");
+                        println!("boot menu offers it if the new one does not work.");
+                    }
+                    Err(e) => {
+                        println!("update: {e}");
+                        println!("nothing was changed.");
+                    }
+                }
+            }
+
+            (Some(other), _) => println!("update: no such command {other:?}"),
+        }
     }
 
     /// Browse and install what the boot media offers.
@@ -1189,6 +1266,7 @@ fn spinner() {
 pub fn run() -> ! {
     Shell::new().run()
 }
+
 
 
 
