@@ -1,4 +1,4 @@
-﻿//! An interactive shell running as a kernel task.
+//! An interactive shell running as a kernel task.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -286,7 +286,7 @@ impl Shell {
     /// What this build is, and what a beta tester should expect of it.
     fn version(&self) {
         println!(
-            "Kestrel {} \"{}\" â€” an experimental x86-64 operating system",
+            "Kestrel {} \"{}\" - an experimental x86-64 operating system",
             crate::VERSION,
             crate::CODENAME
         );
@@ -630,7 +630,7 @@ impl Shell {
     /// be drawing at a time; this takes it and gives it back on exit.
     fn desktop(&mut self) {
         // `desktop` is dispatched from `on_key`, and the loop below feeds keys
-        // straight back into `on_key` â€” so typing it again inside the desktop
+        // straight back into `on_key` — so typing it again inside the desktop
         // would nest a second desktop inside the first.
         if self.in_desktop {
             println!("desktop: already running");
@@ -903,7 +903,7 @@ impl Shell {
         };
 
         if !self.in_desktop {
-            println!("open: only inside the desktop â€” run 'desktop' first");
+            println!("open: only inside the desktop - run 'desktop' first");
             return;
         }
 
@@ -955,7 +955,7 @@ impl Shell {
                 Some(theme) => {
                     crate::theme::replace(theme);
                     self.refresh_desktop();
-                    println!("{name} applied â€” 'theme save' to keep it");
+                    println!("{name} applied - 'theme save' to keep it");
                 }
                 None => println!(
                     "theme: no preset called {name:?} (try {})",
@@ -1179,7 +1179,7 @@ impl Shell {
 /// Build a window of the given kind, sized to the screen.
 ///
 /// One place, used both when the desktop opens and when the launcher reopens
-/// something that was closed â€” so a reopened window is identical to the one
+/// something that was closed — so a reopened window is identical to the one
 /// that was there at the start rather than a second, subtly different version.
 fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crate::desktop::Window {
     use crate::desktop::{Kind, Window};
@@ -1276,6 +1276,7 @@ fn spinner() {
 pub fn run() -> ! {
     Shell::new().run()
 }
+
 
 
 

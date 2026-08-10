@@ -294,7 +294,7 @@
           <div>
             <div class="title-row">
               <h1>Kestrel</h1>
-              <span class="badge">v0.9.1 beta</span>
+              <span class="badge">v0.9.2 beta</span>
             </div>
             <p class="tagline">An operating system, written from scratch</p>
           </div>
@@ -455,6 +455,14 @@
         <p>A compositor with draggable, closable windows, a panel and a launcher, drawing through region-based damage tracking so an idle screen costs nothing.</p>
       </div>
       <div class="card">
+        <h3>Making things</h3>
+        <p>Write a script in the editor and run it with the built-in interpreter, or draw with the mouse in <code>paint</code>. Programs get a window from the kernel and push pixels to it.</p>
+      </div>
+      <div class="card">
+        <h3>Updates</h3>
+        <p>Kestrel replaces its own kernel and packages from inside itself, keeping the previous kernel and offering it in the boot menu if the new one misbehaves.</p>
+      </div>
+      <div class="card">
         <h3>Software</h3>
         <p>Nothing ships installed. The boot media carries a repository, and the Software window installs from it &mdash; to disk where there is one, to RAM where there is not.</p>
       </div>
@@ -524,3 +532,5 @@ cargo xtask run</pre>
 </div>
 </body>
 </html>
+
+

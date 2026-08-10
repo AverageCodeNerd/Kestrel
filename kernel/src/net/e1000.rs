@@ -1,4 +1,4 @@
-﻿//! Intel 8254x ("e1000") gigabit Ethernet driver.
+//! Intel 8254x ("e1000") gigabit Ethernet driver.
 //!
 //! The card is a DMA master with two rings of descriptors: one for receive,
 //! one for transmit. Each descriptor points at a buffer by *physical* address,
@@ -434,7 +434,7 @@ pub fn init() -> Result<[u8; 6], &'static str> {
 ///
 /// QEMU reports the link up the instant `CTRL.SLU` is set, so this costs
 /// nothing there. VirtualBox emulates a real PHY negotiating, which takes a
-/// moment â€” and an 82540 will not transmit without link, so the first frame
+/// moment — and an 82540 will not transmit without link, so the first frame
 /// after boot is silently dropped and the descriptor never completes. That is
 /// exactly what `arp: timed out transmitting` was.
 const LINK_TIMEOUT_MS: u64 = 4000;

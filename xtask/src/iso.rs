@@ -1,4 +1,4 @@
-﻿//! A minimal ISO 9660 image with an El Torito EFI boot entry.
+//! A minimal ISO 9660 image with an El Torito EFI boot entry.
 //!
 //! Two filesystems are involved, which is easy to get wrong:
 //!
@@ -11,7 +11,7 @@
 //! the El Torito boot handle to a volume and falls back to scanning, so the
 //! config and kernel must be reachable through ISO 9660 as well.
 //!
-//! ISO 9660 filenames are 8.3, uppercase, and version-suffixed â€” `LIMINE.CON;1`
+//! ISO 9660 filenames are 8.3, uppercase, and version-suffixed — `LIMINE.CON;1`
 //! rather than `limine.conf`. Rock Ridge `NM` entries in each record's
 //! system-use area carry the real name, which Limine's driver reads.
 
@@ -199,7 +199,7 @@ const PARTITION_GUID: [u8; 16] = *b"KestrelIsoEsp001";
 /// Expose the embedded El Torito boot image as an EFI system partition.
 ///
 /// Without this the ISO boots, but Limine stops with "Could not meaningfully
-/// match the boot device handle with a volume... Press any key" â€” on some
+/// match the boot device handle with a volume... Press any key" — on some
 /// firmware, VirtualBox's included, the El Torito boot handle cannot be
 /// correlated with any volume Limine knows about, and it waits for a keypress
 /// before falling back. Describing the same bytes as a partition as well gives
@@ -207,7 +207,7 @@ const PARTITION_GUID: [u8; 16] = *b"KestrelIsoEsp001";
 /// what `xorriso`'s `-efi-boot-part --protective-msdos-label` produces, and why
 /// the standard Limine ISO recipe passes them.
 ///
-/// The partition table lives in the ISO 9660 *system area* â€” the first 32 KiB,
+/// The partition table lives in the ISO 9660 *system area* — the first 32 KiB,
 /// which the format reserves and never uses.
 fn write_hybrid_gpt(image: &mut [u8], boot_image_lba: u32, boot_image_sectors: u32) {
     let total_sectors = (image.len() / SECTOR) as u64;

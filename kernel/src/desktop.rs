@@ -1,4 +1,4 @@
-﻿//! A windowed desktop drawn straight into the framebuffer.
+//! A windowed desktop drawn straight into the framebuffer.
 //!
 //! Composited back to front into an off-screen buffer, then copied to the
 //! screen in one pass. Drawing directly would mean every window visibly
@@ -34,7 +34,7 @@ const SHORTCUT_LABEL_X: isize = 58;
 /// Everything that measures itself in characters has to be recomputed when the
 /// text scale changes, so it is worked out once per theme change rather than
 /// being const. Keeping it in one struct is what stops the drawing code and
-/// the hit tests drifting apart â€” the bug this file has produced most often.
+/// the hit tests drifting apart — the bug this file has produced most often.
 #[derive(Clone, Copy)]
 struct Metrics {
     cell_w: usize,
@@ -114,7 +114,7 @@ struct Damage {
 /// What a window is for.
 ///
 /// Windows are found by role rather than by position, because closing one
-/// shifts every index after it â€” and the terminal being "window 0" is exactly
+/// shifts every index after it — and the terminal being "window 0" is exactly
 /// the assumption that would quietly send shell output into the System Monitor
 /// the first time somebody closed it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -387,7 +387,7 @@ impl Desktop {
     /// Adopt a changed theme and repaint everything.
     ///
     /// The whole screen is invalidated because a theme change can move the
-    /// panel, resize every glyph and recolour every pixel at once â€” there is
+    /// panel, resize every glyph and recolour every pixel at once — there is
     /// no region small enough to be worth working out.
     pub fn apply_theme(&mut self, theme: Theme) {
         self.m = Metrics::from(&theme);
@@ -416,7 +416,7 @@ impl Desktop {
         self.windows.remove(index);
 
         // Every index after the removed one has shifted, including the one
-        // being dragged â€” simplest and safest is to drop the drag entirely.
+        // being dragged — simplest and safest is to drop the drag entirely.
         self.dragging = None;
         self.focused = self.focused.min(self.windows.len().saturating_sub(1));
         self.invalidate_all();
@@ -424,8 +424,8 @@ impl Desktop {
 
     /// A window the user asked for that does not exist yet.
     ///
-    /// The compositor knows what was clicked but not how to build a window â€”
-    /// where it goes, how big it is, what is in it â€” so it records the request
+    /// The compositor knows what was clicked but not how to build a window —
+    /// where it goes, how big it is, what is in it — so it records the request
     /// and the shell services it on the next pass.
     pub fn take_open_request(&mut self) -> Option<Kind> {
         self.open_request.take()
@@ -639,8 +639,8 @@ impl Desktop {
 
     /// Mark one window's rectangle as needing a repaint.
     ///
-    /// Used when a window's *contents* change rather than its position â€” the
-    /// terminal window as output arrives â€” so a busy command does not force a
+    /// Used when a window's *contents* change rather than its position — the
+    /// terminal window as output arrives — so a busy command does not force a
     /// full-screen repaint per line.
     pub fn invalidate_window(&mut self, index: usize) {
         let Some(window) = self.windows.get(index) else {
@@ -780,7 +780,7 @@ impl Desktop {
     /// The Kestrel mark, drawn in the current theme's colours.
     ///
     /// `logo::part` gives the shape without committing to a palette, so the
-    /// falcon takes the theme rather than staying its own blue â€” an icon that
+    /// falcon takes the theme rather than staying its own blue — an icon that
     /// ignores the theme is the one thing that gives away a recoloured desktop
     /// as a recolouring.
     fn draw_logo(&mut self, x: usize, y: usize, size: usize) {
@@ -808,7 +808,7 @@ impl Desktop {
 
     /// Draw text truncated to `max_width` pixels.
     ///
-    /// Every label here sits in a box â€” a button, a title bar, a panel slot â€”
+    /// Every label here sits in a box — a button, a title bar, a panel slot —
     /// and unbounded text simply runs past it and over whatever is next. The
     /// truncation is marked so a clipped label is not mistaken for the name.
     fn draw_text_within(&mut self, x: isize, y: isize, text: &str, colour: u32, max_width: usize) {
@@ -852,7 +852,7 @@ impl Desktop {
     /// Whether `(x, y)` is inside the shortcut whose icon starts at `top`.
     ///
     /// The label is part of the shortcut as far as a user is concerned, so the
-    /// target covers the text too â€” measured from where the text is actually
+    /// target covers the text too — measured from where the text is actually
     /// drawn rather than guessed, which is how it came to stop short of it.
     fn in_shortcut(&self, x: isize, y: isize, top: isize) -> bool {
         x >= SHORTCUT_X
@@ -1135,7 +1135,7 @@ impl Desktop {
     /// It is drawn at `last_cursor`, not at the live pointer position. The
     /// mouse interrupt moves the pointer asynchronously, so re-reading it here
     /// could place the arrow outside the region `handle_mouse` invalidated for
-    /// it â€” half of it would be clipped away, and the other half would never be
+    /// it — half of it would be clipped away, and the other half would never be
     /// erased. Drawing where the damage says it is keeps the two in step; the
     /// next event invalidates the real position a frame later.
     fn draw_cursor(&mut self) {
@@ -1291,7 +1291,7 @@ impl Desktop {
                 if within {
                     if let Some(&kind) = Kind::ALL.get(row) {
                         // Focus it if it is open, otherwise ask for it to be
-                        // opened â€” which is what makes closing a window
+                        // opened — which is what makes closing a window
                         // recoverable rather than permanent.
                         match self.find(kind) {
                             Some(index) => self.focused = index,
@@ -1309,7 +1309,7 @@ impl Desktop {
 
         // The desktop shortcuts mirror the launcher entries, and behave the
         // same way: focus what is open, open what is not. By kind rather than
-        // by index â€” a closed window shifts every index after it, so "shortcut
+        // by index — a closed window shifts every index after it, so "shortcut
         // two means window one" stops being true the moment anything closes.
         if self.theme.show_shortcuts {
             for (row, top) in [SHORTCUT_TOP, SHORTCUT_SECOND_TOP].iter().enumerate() {
@@ -1330,7 +1330,7 @@ impl Desktop {
         // A fresh press: find the topmost window whose title bar was hit.
         //
         // Checked from the top down so a window covering another takes the
-        // click, and the close button is tested before the drag â€” otherwise
+        // click, and the close button is tested before the drag — otherwise
         // pressing it would start a drag instead of closing anything.
         for index in (0..self.windows.len()).rev() {
             if self.windows[index].contains_close(x, y) {
@@ -1363,7 +1363,7 @@ impl Desktop {
 /// Window text is wrapped rather than truncated because a window is a page,
 /// not a label: cutting a sentence off at the frame loses the half that
 /// mattered, whereas a panel button has nowhere to put a second line.
-/// A word longer than the whole line is broken mid-word â€” there is no better
+/// A word longer than the whole line is broken mid-word — there is no better
 /// answer, and refusing to break it would put pixels outside the window.
 fn wrap(text: &str, columns: usize) -> Vec<&str> {
     let mut pieces = Vec::new();
@@ -1456,7 +1456,7 @@ pub fn surface_pointer() -> u64 {
 pub static DESKTOP: Mutex<Option<Desktop>> = Mutex::new(None);
 
 /// Set when something has painted over the framebuffer behind the compositor's
-/// back â€” in practice `println!`, which writes to the text console directly.
+/// back — in practice `println!`, which writes to the text console directly.
 ///
 /// Before damage tracking, a stray kernel message was erased by the next
 /// full-screen repaint. Now that only changed pixels reach the screen, it would

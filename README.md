@@ -1,4 +1,4 @@
-﻿# Kestrel
+# Kestrel
 
 An x86-64 operating system written from scratch in Rust, booted by
 [Limine](https://github.com/limine-bootloader/limine) under UEFI.
@@ -7,7 +7,7 @@ It boots on real UEFI firmware, drives the framebuffer, keyboard and mouse
 itself, manages its own page tables, preemptively schedules across every core,
 speaks TCP/IP over its own network driver, reads and writes a FAT32 disk, and
 loads ELF programs into isolated address spaces where they run in ring 3 behind
-a `syscall` interface â€” from a shell that runs either on the console or inside
+a `syscall` interface — from a shell that runs either on the console or inside
 a window on its own compositor.
 
 Everything below the bootloader is original: no libc, no drivers borrowed from
@@ -16,21 +16,21 @@ anywhere, no kernel to fall back on.
 ## Beta
 
 **This is beta software.** It boots, it is usable, and it will not eat your
-computer â€” but it has no security model, no filesystem consistency checking and
+computer — but it has no security model, no filesystem consistency checking and
 no recovery of any kind. **Run it in a virtual machine.** Do not attach a disk
 whose contents you would miss.
 
 Download `kestrel-<version>.iso` from
 [Releases](https://github.com/AverageCodeNerd/Kestrel/releases) and boot it in
 any VM set to **UEFI firmware with Secure Boot off**. That is the only
-requirement. Check it against `SHA256SUMS` if you like â€” a truncated download
+requirement. Check it against `SHA256SUMS` if you like — a truncated download
 looks exactly like a kernel that fails to boot.
 
 The build is **reproducible**: cloning this repository and running
 `.\release.ps1` produces images whose SHA-256 hashes match the published ones
 exactly, so you never have to take a binary on trust. `kestrel.vhd` is the same
 system as a hard disk image, which is the better choice if you want files to
-survive a reboot â€” booted from the ISO there is no writable disk, so `/disk`
+survive a reboot — booted from the ISO there is no writable disk, so `/disk`
 is absent.
 
 Type `help` for the command list, `version` for what this build is, and
@@ -52,6 +52,50 @@ store remove snake          take it off again
 exec snake                  run an installed program by name
 ```
 
+What is on offer: **edit**, a line editor; **snake**; **paint**, which draws
+with the mouse in its own window; **basic**, for writing your own programs; and
+`hello`, `fault` and `selfmod`, which demonstrate ring 3, faults and W^X.
+
+## Making programs
+
+Kestrel is a system you can build things on rather than only run things on.
+Write a script with `edit`, run it with `basic`:
+
+```
+print "counting to five"
+let i = 1
+print i
+let i = i + 1
+if i <= 5 then goto 3
+print "done"
+```
+
+It is BASIC-shaped because that is what fits: user programs have no allocator,
+so the interpreter is fixed arrays throughout. Jumps are by line number,
+counting from one.
+
+`paint` is the other half — swatches, an adjustable brush, and save. Programs
+get a window from the kernel and push pixels to it; they never touch the
+framebuffer, so one cannot draw over another.
+
+## Updating
+
+Kestrel can replace its own kernel and packages from inside itself:
+
+```
+update from http://host/path    where to look
+update                          what is on offer
+update install                  take it
+```
+
+Nothing is written until every file has arrived and been checked, the outgoing
+kernel is kept as `kestrel.old`, and the boot menu offers it — so a bad update
+is a menu choice away from being undone rather than final.
+
+**This checks integrity, not authenticity.** There is no TLS and no signing:
+anyone who can answer the request can hand your machine a kernel and it will
+run it. Point it only at a source you trust.
+
 Installs go to `/disk/apps` and survive a reboot. Booted from the ISO there is
 no writable disk, so they go to RAM instead and last until you shut down — the
 Software window says which is happening.
@@ -66,7 +110,7 @@ cannot be shipped without a description or described without being shipped.
 
 ## Making it yours
 
-Open the launcher and pick **Settings** â€” presets, toggles and steppers, all
+Open the launcher and pick **Settings** — presets, toggles and steppers, all
 applying as you click them. `open settings` does the same from the keyboard,
 which matters on machines with no working mouse.
 
@@ -78,7 +122,7 @@ idea of what a setting is:
 theme                       list every setting and its value
 theme amber                 default, midnight, paper, amber, matrix
 set panel.top on            move the panel to the top edge
-set scale 3                 bigger text â€” everything measured in
+set scale 3                 bigger text — everything measured in
                             characters resizes with it
 set desktop.top #204060     any #rrggbb, or a name like 'blue'
 set status.text Hello       the panel's corner text
@@ -96,7 +140,7 @@ not from the ISO.
 ## What it looks like
 
 The shell, running inside a window on Kestrel's own compositor. Every command
-works the same here as on the console â€” output is the same byte stream, routed
+works the same here as on the console — output is the same byte stream, routed
 into a terminal window rather than the text console.
 
 ![The Kestrel desktop, with the shell running in a window](docs/desktop.png)
@@ -159,7 +203,7 @@ cargo xtask run --image --keep-image              # don't regenerate the disk
 
 `--keep-image` preserves whatever the guest wrote to the disk. Note that the
 kernel lives on that image too, so keeping it also keeps the kernel that was
-there â€” drop the flag after rebuilding.
+there — drop the flag after rebuilding.
 
 Build images with `--release`. The debug kernel is 3.9 MB against 220 KB
 optimised, and booting that off an emulated CD takes about half a minute.
@@ -175,20 +219,20 @@ the actual keyboard driver. That is how the shell is tested.
 
 `cargo xtask image --release` produces three files:
 
-- `build/kestrel.img` â€” 64 MiB raw GPT disk with a FAT32 EFI system partition
-- `build/kestrel.vhd` â€” the same image with a fixed-format VHD footer
-- `build/kestrel.iso` â€” 16 MiB bootable disc image, for a virtual DVD drive
+- `build/kestrel.img` — 64 MiB raw GPT disk with a FAT32 EFI system partition
+- `build/kestrel.vhd` — the same image with a fixed-format VHD footer
+- `build/kestrel.iso` — 16 MiB bootable disc image, for a virtual DVD drive
 
-**The VM must be set to boot UEFI, not BIOS** â€” Kestrel has no legacy boot
-path â€” and **Secure Boot must be off**, because Limine is not signed.
+**The VM must be set to boot UEFI, not BIOS** — Kestrel has no legacy boot
+path — and **Secure Boot must be off**, because Limine is not signed.
 
-- **Hyper-V** â€” new VM, Generation 2. Either attach `kestrel.vhd` as an
+- **Hyper-V** — new VM, Generation 2. Either attach `kestrel.vhd` as an
   existing hard disk, or attach `kestrel.iso` to the DVD drive and move it up
   in the firmware boot order. The VHD is the simpler of the two.
-  **The keyboard will not work â€” see below.**
-- **VirtualBox** â€” tick System â†’ Enable EFI, then attach `kestrel.vhd` to the
+  **The keyboard will not work — see below.**
+- **VirtualBox** — tick System → Enable EFI, then attach `kestrel.vhd` to the
   SATA controller or `kestrel.iso` to the optical drive.
-- **VMware** â€” set `firmware = "efi"` in the `.vmx`, then attach the ISO, or
+- **VMware** — set `firmware = "efi"` in the `.vmx`, then attach the ISO, or
   convert the disk with `qemu-img convert -O vmdk kestrel.img kestrel.vmdk`.
 
 The ISO carries two filesystems, which is easy to get wrong when modifying it.
@@ -200,10 +244,10 @@ rather than FAT32 because the boot catalog records the image size as a 16-bit
 count of 512-byte sectors, capping it below FAT32's minimum size.
 
 The ISO also carries a protective MBR and a GPT describing that same embedded
-FAT16 volume as an EFI system partition â€” the equivalent of `xorriso`'s
+FAT16 volume as an EFI system partition — the equivalent of `xorriso`'s
 `-efi-boot-part --protective-msdos-label`. Without it, firmware hands Limine a
 boot handle it cannot match to any volume, and it stops with "Could not
-meaningfully match the boot device handle with a volumeâ€¦ Press any key",
+meaningfully match the boot device handle with a volume… Press any key",
 which makes the disc unbootable unattended. Two constraints come with it: the
 partition table lives in the ISO 9660 system area (the reserved first 32 KiB),
 and **the image length must stay a whole multiple of 2048 bytes** or VirtualBox
@@ -217,7 +261,7 @@ the boot log appears and the prompt sits there ignoring you. It says so at
 boot: `ps/2 : no keyboard - use the serial console for input`.
 
 Generation 1 VMs *do* have a PS/2 keyboard, but they boot BIOS rather than
-UEFI, and these images are UEFI-only â€” so if it boots on Hyper-V at all, it is
+UEFI, and these images are UEFI-only — so if it boots on Hyper-V at all, it is
 Generation 2 and the keyboard is unavailable.
 
 The way in is the serial console. Give the VM a COM port backed by a named
@@ -227,8 +271,8 @@ pipe:
 Set-VMComPort -VMName Kestrel -Number 1 -Path \\.\pipe\kestrel
 ```
 
-Then attach a terminal to that pipe â€” PuTTY takes `\\.\pipe\kestrel` as its
-serial line â€” and you get the same shell, with line editing and history. The
+Then attach a terminal to that pipe — PuTTY takes `\\.\pipe\kestrel` as its
+serial line — and you get the same shell, with line editing and history. The
 serial console is a first-class input: everything works there.
 
 If you would rather have a window and a real keyboard, QEMU (`cargo xtask run`)
@@ -242,7 +286,7 @@ and VirtualBox with EFI enabled both emulate a PS/2 controller.
 - QEMU, with its bundled `edk2-x86_64-code.fd` UEFI firmware. Set `QEMU_DIR` if
   it is not at `C:\Program Files\qemu`.
 
-No C cross-compiler is needed â€” `x86_64-unknown-none` links with the bundled
+No C cross-compiler is needed — `x86_64-unknown-none` links with the bundled
 `rust-lld`.
 
 ## Layout
@@ -289,7 +333,7 @@ xtask/
   src/crc.rs         CRC-32, shared by PNG chunks and GPT headers
 limine/              prebuilt Limine v11 binaries; a shallow clone of the
                      upstream `v11.x-binary` branch, so it carries its own
-                     .git â€” delete that (or make it a submodule) before
+                     .git — delete that (or make it a submodule) before
                      committing Kestrel. Refresh with `git -C limine pull`.
 ```
 
@@ -302,7 +346,7 @@ relocating at load time. Communication happens through structs in the
 `.limine_requests` section, bracketed by start/end markers.
 
 **MMIO is not in the direct map.** Limine direct-maps RAM, but not device
-registers. The APIC pages have to be mapped by the kernel before first touch â€”
+registers. The APIC pages have to be mapped by the kernel before first touch —
 which is why memory management has to come up before interrupts.
 
 **ACPI is parsed with unaligned reads throughout.** ACPI tables are byte-packed
@@ -315,14 +359,14 @@ touch atomics and ring buffers. Correspondingly, `println!` masks interrupts
 for its critical section, so a task cannot be preempted mid-print.
 
 **Long filenames are load-bearing.** The bootloader insists on a file named
-`limine.conf`, and a four-character extension does not fit an 8.3 short name â€”
+`limine.conf`, and a four-character extension does not fit an 8.3 short name —
 so the FAT32 writer has to emit real long-filename entries.
 
 ## Processes
 
 `exec` loads an ELF file into a brand-new address space and puts it on the run
 queue. Each process gets its own page tables, so several can be resident at
-once â€” all linked at the same address, `0x400000`, without colliding â€” and each
+once — all linked at the same address, `0x400000`, without colliding — and each
 gets its own ring-0 stack, so an interrupt taken in user mode never lands on
 another process's kernel state.
 
@@ -340,7 +384,7 @@ every target.
 
 The controller is a DMA master: it reads its command list out of RAM and writes
 sector data back, all by *physical* address. That is why those buffers come
-from the frame allocator rather than the heap â€” the heap hands out virtual
+from the frame allocator rather than the heap — the heap hands out virtual
 addresses whose physical backing is neither known nor contiguous. Transfers are
 polled rather than interrupt-driven, which is simpler and fast enough when the
 only reads happen on `exec`.
@@ -357,16 +401,16 @@ kestrel remembers this
 
 `mkdir` and `rm` work there too; removing a directory requires it to be empty.
 
-Writing means allocating a cluster chain, updating *both* copies of the FAT â€”
+Writing means allocating a cluster chain, updating *both* copies of the FAT —
 they are mirrored, and updating only one leaves the volume inconsistent for
-anything else that reads it â€” and creating or rewriting the directory entry.
+anything else that reads it — and creating or rewriting the directory entry.
 The contents are laid down before the directory entry is touched, so a failure
 part-way leaves the old file intact rather than a directory pointing at a
 half-written one. A new directory is seeded with `.` and `..`, which are real
 entries on disk rather than something the filesystem invents; a `..` pointing
 at the root is recorded as cluster 0 by convention.
 
-Names that differ from their 8.3 form only by case â€” `docs`, `readme.txt` â€”
+Names that differ from their 8.3 form only by case — `docs`, `readme.txt` —
 are stored in the short entry with a flag saying which half to lowercase, and
 need no long-name entries. Anything else, `MixedCase.TXT` included, gets a
 proper long-name group. The formatter in `xtask` and the kernel driver share
@@ -377,7 +421,7 @@ this behaviour, so an image looks the same whichever wrote it.
 Limine takes the other cores out of reset and parks them, so bringing them up
 is a matter of writing a function pointer rather than hand-writing a real-mode
 trampoline. Each then builds its own world: its own GDT and TSS, its own local
-APIC and timer, and its own `EFER` bits â€” that register is per-core, and
+APIC and timer, and its own `EFER` bits — that register is per-core, and
 forgetting NX on one core makes every no-execute page fault there and nowhere
 else.
 
@@ -390,7 +434,7 @@ afterwards.
 
 The system call path needs per-core state, since two cores can be inside a call
 at once. That state is reached through `swapgs`, with the kernel pointer kept in
-the *shadow* GS base so a user program cannot reach it â€” and, more to the point,
+the *shadow* GS base so a user program cannot reach it — and, more to the point,
 cannot break the entry path by loading a GS selector, which would zero the base
 the stub depends on.
 
@@ -417,10 +461,10 @@ shutdown        power off
 ```
 
 Finished tasks are reaped from the shell's idle loop, which returns their
-stacks, page tables, and frames to the allocator â€” a task cannot free the
+stacks, page tables, and frames to the allocator — a task cannot free the
 stack it is still standing on, so it has to be collected after it is gone.
 Freed frames go on an intrusive free list, with the link stored inside each
-free frame, because the frame allocator has to work before the heap exists â€”
+free frame, because the frame allocator has to work before the heap exists —
 it is what the heap is built from.
 
 Segments get the permissions the ELF asks for: code is read-execute, data is
@@ -430,13 +474,13 @@ through the direct map rather than through the process's own mapping.
 
 Marking pages non-executable requires `EFER.NXE`; without it the CPU treats
 bit 63 of a page table entry as reserved and *every* access to such a page
-faults. The `selfmod` package demonstrates the result â€” it tries to rewrite its
+faults. The `selfmod` package demonstrates the result — it tries to rewrite its
 own code, is killed, and the kernel carries on.
 
 The system call ABI follows Linux: number in RAX, arguments in RDI/RSI/RDX,
 result in RAX. Every general-purpose register is preserved except RAX, and
 RCX/R11, which the `syscall` instruction itself overwrites. That last part is
-load-bearing â€” the kernel's entry stub has to save the argument registers and
+load-bearing — the kernel's entry stub has to save the argument registers and
 r8-r10 by hand, because the Rust function it calls will otherwise clobber them,
 and a program built with optimisations *will* notice.
 
@@ -460,12 +504,12 @@ bootable disk and disc images.
 Things a beta tester will actually run into, worst first:
 
 - **No TLS**, so `https://` is out of reach, and `fetch` is a client rather
-  than a browser â€” nothing parses or renders HTML.
+  than a browser — nothing parses or renders HTML.
 - **Booting the ISO gives you no writable disk.** `/disk` only exists when
   booting the `.vhd`/`.img`; from a virtual DVD, only the in-RAM filesystem is
   present and nothing survives a reboot.
 - **The keyboard does not work on Hyper-V.** Generation 2 VMs have no PS/2
-  controller. Use the serial console â€” see above.
+  controller. Use the serial console — see above.
 - **One window of each kind.** Windows can be closed with the button on their
   title bar and reopened from the launcher or the desktop shortcuts, but there
   is no way to have two terminals at once.
@@ -475,7 +519,7 @@ Things a beta tester will actually run into, worst first:
 - **Tasks never migrate between cores.** They are pinned where they are
   spawned, so a core can end up idle while another has a queue. Work stealing
   would need the release/save race below solved properly.
-- **No `fork`/`exec` split** â€” `exec` always makes a new process rather than
+- **No `fork`/`exec` split** — `exec` always makes a new process rather than
   replacing the caller.
 - **Shutdown is best-effort.** A proper ACPI power-off needs the `\_S5` object
   from the DSDT, which is AML bytecode; this tries the ports emulators

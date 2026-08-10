@@ -1,4 +1,4 @@
-﻿//! A drawing program for Kestrel.
+//! A drawing program for Kestrel.
 //!
 //! The first program to put pixels on the screen rather than characters. It
 //! asks the kernel for a window, reads the pointer's position inside it, and

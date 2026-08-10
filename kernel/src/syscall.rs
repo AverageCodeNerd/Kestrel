@@ -1,4 +1,4 @@
-﻿//! The SYSCALL/SYSRET system call interface.
+//! The SYSCALL/SYSRET system call interface.
 //!
 //! `syscall` is fast because it does almost nothing: it loads CS/SS from
 //! fixed MSRs, stashes the return address in RCX and the flags in R11, and
@@ -15,24 +15,24 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_EXIT: u64 = 2;
 pub const SYS_GETPID: u64 = 3;
 pub const SYS_YIELD: u64 = 4;
-/// read(fd, buffer, length) â€” from the keyboard or the serial console.
+/// read(fd, buffer, length) — from the keyboard or the serial console.
 pub const SYS_READ: u64 = 5;
-/// load(path, length, buffer, capacity) â€” a whole file at once.
+/// load(path, length, buffer, capacity) — a whole file at once.
 pub const SYS_LOAD: u64 = 6;
-/// store(path, length, buffer, count) â€” replace a whole file.
+/// store(path, length, buffer, count) — replace a whole file.
 pub const SYS_STORE: u64 = 7;
 /// sleep(milliseconds).
 pub const SYS_SLEEP: u64 = 8;
 /// poll() -> 1 if a keystroke is waiting. Lets a program stay responsive
 /// without blocking, which is what anything animated needs.
 pub const SYS_POLL: u64 = 9;
-/// clear() â€” wipe the screen and return to the top.
+/// clear() — wipe the screen and return to the top.
 pub const SYS_CLEAR: u64 = 10;
-/// surface(width, height, title, title_length) â€” ask for a window to draw in.
+/// surface(width, height, title, title_length) — ask for a window to draw in.
 pub const SYS_SURFACE: u64 = 11;
-/// blit(pixels, count) â€” push a frame to that window.
+/// blit(pixels, count) — push a frame to that window.
 pub const SYS_BLIT: u64 = 12;
-/// pointer() â€” where the mouse is within the window, and which buttons are
+/// pointer() — where the mouse is within the window, and which buttons are
 /// down, packed as `(buttons << 32) | (y << 16) | x`.
 pub const SYS_POINTER: u64 = 13;
 
@@ -72,7 +72,7 @@ unsafe extern "C" fn syscall_entry() {
 
         // Save everything the user might care about. `dispatch` is an ordinary
         // Rust function, so it will happily clobber every caller-saved
-        // register â€” including the argument registers and r8-r10, which a
+        // register — including the argument registers and r8-r10, which a
         // user program has no reason to expect are destroyed.
         //
         // The contract this establishes matches Linux: a system call
@@ -97,7 +97,7 @@ unsafe extern "C" fn syscall_entry() {
         // Safe to take interrupts again now that we are off the user stack.
         // Leaving them masked for the whole call would drop keystrokes during
         // anything slow, such as drawing to the framebuffer. An interrupt
-        // arriving here does not switch stacks â€” we are already in ring 0 â€”
+        // arriving here does not switch stacks — we are already in ring 0 —
         // so it simply nests on this stack.
         "sti",
 

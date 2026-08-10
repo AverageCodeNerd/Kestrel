@@ -35,6 +35,25 @@ try {
         }
     }
 
+    # The console draws from an 8x8 ASCII font, so any other character reaches
+    # the screen as one question mark per UTF-8 byte. An em dash in a message
+    # nobody happened to trigger shipped in 0.9.1 that way. Comments never
+    # reach the screen, so only the rest is checked.
+    $offenders = @()
+    foreach ($file in Get-ChildItem "$root\kernel\src", "$root\user" -Recurse -Filter *.rs) {
+        $number = 0
+        foreach ($line in Get-Content $file.FullName -Encoding UTF8) {
+            $number++
+            if ($line.TrimStart().StartsWith("//")) { continue }
+            if ($line -match "[^\x00-\x7F]") {
+                $offenders += "  $($file.FullName):$number`: $($line.Trim())"
+            }
+        }
+    }
+    if ($offenders.Count -gt 0) {
+        throw "non-ASCII in code the console can print:`n" + ($offenders -join "`n")
+    }
+
     # Always release-profile: the debug kernel is ~18x larger and takes about
     # half a minute to boot off an emulated CD.
     cargo xtask image --release

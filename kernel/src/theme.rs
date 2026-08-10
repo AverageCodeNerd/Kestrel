@@ -1,8 +1,8 @@
-﻿//! Everything about the desktop's appearance that a user may change.
+//! Everything about the desktop's appearance that a user may change.
 //!
 //! The compositor used to carry these as constants. They live here instead so
 //! there is exactly one place that knows what a setting is called, what it may
-//! hold, and what it means â€” the shell's `set` command, the file written to
+//! hold, and what it means — the shell's `set` command, the file written to
 //! disk and the renderer all go through this one table rather than each
 //! keeping its own list to fall out of step with the others.
 //!
@@ -337,7 +337,7 @@ fn parse_colour(text: &str) -> Result<u32, String> {
 
     if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
-            "{text:?} is not a colour â€” expected #rrggbb or a name like 'blue'"
+            "{text:?} is not a colour - expected #rrggbb or a name like 'blue'"
         ));
     }
 
@@ -381,7 +381,7 @@ pub fn preset(name: &str) -> Option<Theme> {
             theme.wallpaper = Wallpaper::Solid;
         }
 
-        // Light, flat and quiet â€” the opposite of the default.
+        // Light, flat and quiet — the opposite of the default.
         "paper" => {
             theme.desktop_top = 0xE8E4DA;
             theme.desktop_bottom = 0xD3CEC2;
@@ -456,7 +456,7 @@ pub fn preset(name: &str) -> Option<Theme> {
 
 /// Where settings live between boots.
 ///
-/// On the real disk rather than the RAM filesystem, which is the whole point â€”
+/// On the real disk rather than the RAM filesystem, which is the whole point —
 /// and at the root rather than in a directory, so saving never depends on
 /// having created one. Booting the ISO leaves `/disk` absent entirely, and
 /// everything here degrades to "keep the defaults" rather than failing.
@@ -465,9 +465,9 @@ pub const CONFIG_PATH: &str = "/disk/desktop.conf";
 /// Read the saved theme, if there is one.
 ///
 /// Returns the complaints about lines it could not use, so the caller can show
-/// them. A missing file is not a complaint â€” it is the normal first boot.
+/// them. A missing file is not a complaint — it is the normal first boot.
 pub fn load_from_disk() -> Option<Vec<String>> {
-    // The free functions, not `vfs::with` â€” the latter hands back the in-RAM
+    // The free functions, not `vfs::with` — the latter hands back the in-RAM
     // filesystem, which knows nothing about the /disk mount and would happily
     // "save" settings somewhere that vanishes at power off.
     let bytes = crate::vfs::read(CONFIG_PATH).ok()?;

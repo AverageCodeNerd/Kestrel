@@ -1,4 +1,4 @@
-﻿//! Build driver for Kestrel: compiles the kernel, assembles a bootable EFI
+//! Build driver for Kestrel: compiles the kernel, assembles a bootable EFI
 //! system partition around Limine, and launches it under QEMU.
 //!
 //! Run via the cargo alias: `cargo xtask run`.
@@ -254,8 +254,8 @@ fn assemble_esp(opts: &Options) -> PathBuf {
         panic!("kernel binary not found at {}", kernel.display());
     }
 
-    // Start clean. QEMU's `fat:rw:` lets the guest firmware write here â€” OVMF
-    // drops an NvVars file for its EFI variables â€” and that must not end up
+    // Start clean. QEMU's `fat:rw:` lets the guest firmware write here — OVMF
+    // drops an NvVars file for its EFI variables — and that must not end up
     // inside a distributed image.
     if esp.exists() {
         std::fs::remove_dir_all(&esp).expect("could not clear the staged ESP");
@@ -504,7 +504,7 @@ fn run_qemu(opts: &Options, iso: Option<&Path>) {
 }
 
 /// Type `text` into the guest using the monitor's `sendkey` command, which
-/// injects real PS/2 scancodes â€” so this exercises the kernel's keyboard
+/// injects real PS/2 scancodes — so this exercises the kernel's keyboard
 /// driver exactly as a human would.
 fn send_keys(text: &str) -> std::io::Result<usize> {
     let mut stream = TcpStream::connect(("127.0.0.1", MONITOR_PORT))?;
