@@ -276,6 +276,8 @@ impl Shell {
             "shutdown" | "poweroff" => crate::power::shutdown(),
             "mem" => self.mem(),
             "uptime" => self.uptime(),
+            "date" | "time" => self.date(),
+            "notify" => self.notify_command(&args),
             "uname" => println!("Kestrel {} x86_64", crate::VERSION),
             "version" => self.version(),
             "clear" => print::clear(),
@@ -332,6 +334,8 @@ impl Shell {
         println!("                      (/bin is in RAM, /disk is the real disk)");
         println!("  mem                 memory statistics");
         println!("  uptime              time since boot");
+        println!("  date                the wall clock, from the RTC");
+        println!("  notify <message>    raise a desktop notification");
         println!("  uname               kernel version");
         println!("  version             release, build and what to expect of it");
         println!("  clear               clear the screen");
@@ -680,6 +684,11 @@ impl Shell {
             // DESKTOP lock would deadlock against the compositor.
             let mut leaving = false;
             while let Some(byte) = keyboard::read() {
+                // The desktop gets first refusal: Escape closes an open menu
+                // rather than leaving the desktop out from under it.
+                if crate::desktop::take_key(byte) {
+                    continue;
+                }
                 if byte == keyboard::KEY_ESCAPE {
                     leaving = true;
                 } else {
@@ -687,6 +696,9 @@ impl Shell {
                 }
             }
             while let Some(byte) = crate::serial::read() {
+                if crate::desktop::take_key(byte) {
+                    continue;
+                }
                 if byte == 0x1B {
                     leaving = true;
                 } else {
@@ -703,6 +715,16 @@ impl Shell {
             // The same pass a waiting `exec` runs, so the screen behaves
             // identically whether or not a program is in the foreground.
             self.pump_desktop();
+
+            // A program picked from the launcher is run here, in the loop,
+            // rather than inside `pump_desktop` - `exec` is foreground and
+            // pumps the desktop itself while it waits, so starting one from
+            // inside the pump would have it call back into itself.
+            if let Some(name) = crate::desktop::with(|d| d.take_run_request()).flatten() {
+                println!("exec {name}");
+                self.execute(&alloc::format!("exec {name}"));
+                self.prompt();
+            }
 
             task::yield_now();
         }
@@ -1163,6 +1185,61 @@ impl Shell {
         println!("  ramdisk  : {used} bytes in files");
     }
 
+    /// Raise a notification by hand, which is how the desktop's own
+    /// notifications get tested without waiting for something to go wrong.
+    fn notify_command(&self, args: &[&str]) {
+        let Some((first, rest)) = args.split_first() else {
+            println!("usage: notify [info|ok|warning|error] <message>");
+            return;
+        };
+
+        use crate::notify::Kind;
+        let (kind, words) = match *first {
+            "info" => (Kind::Info, rest),
+            "ok" | "success" => (Kind::Success, rest),
+            "warning" | "warn" => (Kind::Warning, rest),
+            "error" => (Kind::Error, rest),
+            _ => (Kind::Info, args),
+        };
+
+        if words.is_empty() {
+            println!("usage: notify [info|ok|warning|error] <message>");
+            return;
+        }
+
+        crate::notify::post("Kestrel", &words.join(" "), kind);
+        if !self.in_desktop {
+            println!("  notification queued - it will appear in the desktop");
+        }
+    }
+
+    /// The wall clock, as opposed to `uptime`, which is how long since boot.
+    fn date(&self) {
+        let Some(now) = crate::clock::now() else {
+            println!("date: no real-time clock on this machine");
+            return;
+        };
+
+        let offset = crate::clock::offset_hours();
+        println!(
+            "  {} {} {} {} {:02}:{:02}:{:02}",
+            crate::clock::weekday(&now),
+            now.day,
+            crate::clock::MONTHS[(now.month.clamp(1, 12) - 1) as usize],
+            now.year,
+            now.hour,
+            now.minute,
+            now.second
+        );
+        println!(
+            "  from the hardware clock{}",
+            match offset {
+                0 => alloc::string::String::from(" ('set clock.offset 2' to shift it)"),
+                hours => alloc::format!(", shifted by {hours:+} hours"),
+            }
+        );
+    }
+
     fn uptime(&self) {
         let ticks = apic::ticks();
         let seconds = ticks / apic::TIMER_FREQUENCY as u64;
@@ -1184,33 +1261,65 @@ impl Shell {
 fn build_window(kind: crate::desktop::Kind, width: usize, height: usize) -> crate::desktop::Window {
     use crate::desktop::{Kind, Window};
 
+    // Positions and minimum sizes are in scaled pixels for the same reason the
+    // rest of the desktop is: a window measured in raw pixels holds half as
+    // much text at scale 2, and the Settings controls - which are laid out in
+    // character cells - would run straight out of the bottom of it.
+    let scale = crate::theme::current().scale;
+    let s = |value: usize| value * scale;
+    let at = |value: usize| (value * scale) as isize;
+
     match kind {
         // A program's window is created by the program, through the surface
         // system call, so this is only ever reached if something asks for one
         // by mistake. An empty window is a clearer answer than a panic.
-        Kind::Surface => Window::new(kind, 200, 200, 320, 240),
+        Kind::Surface => Window::new(kind, at(200), at(200), s(320), s(240)),
 
-        Kind::Terminal => Window::new(kind, 180, 66, width * 6 / 10, height / 2),
+        // Clear of the desktop shortcuts on the left, and short enough that
+        // its bottom edge stays above the monitor window in the corner.
+        Kind::Terminal => Window::new(kind, at(180), at(66), width * 6 / 10, height * 2 / 5),
 
-        // Sized to its contents rather than to the screen: the controls are
-        // laid out in character cells, and this is what holds them all at the
-        // default text size without scrolling.
-        Kind::Settings => Window::new(kind, 120, 120, (width * 5 / 10).max(520), 460),
+        // Sized to its contents rather than guessed at: these two windows are
+        // lists of controls, they cannot scroll, and a height in round numbers
+        // clipped the last few rows away as soon as the text scale changed.
+        Kind::Settings | Kind::Software => {
+            let theme = crate::theme::current();
+            let (cell_w, cell_h) = (theme.cell_width(), theme.cell_height());
+            let window_width = (width * 5 / 10).max(s(520));
 
-        // Taller than Settings: one row per package, two lines each.
-        Kind::Software => Window::new(kind, 150, 100, (width * 5 / 10).max(520), 500),
+            let items = if kind == Kind::Software {
+                crate::settings::software_layout(0, 0, window_width, cell_w, cell_h)
+            } else {
+                crate::settings::layout(&theme, 0, 0, window_width, cell_w, cell_h)
+            };
+            let content = crate::settings::content_height(&items, 0) + s(10);
+
+            // Never taller than the space above the panel: a window that runs
+            // off the bottom of the screen hides the very controls that would
+            // have made it smaller.
+            let room = height.saturating_sub(theme.panel_height + s(24));
+            let window_height = (content + theme.title_height).min(room);
+            let x = if kind == Kind::Software { at(150) } else { at(120) };
+            let y = at(60).min((height - theme.panel_height - window_height - s(12)) as isize);
+
+            Window::new(kind, x, y, window_width, window_height)
+        }
 
         Kind::Monitor => {
-            // Placed so it stays on screen: the right edge is measured back
-            // from the display, not extrapolated from the other window.
-            let monitor_width = width / 3;
+            // Placed so it stays on screen and clear of the terminal: the
+            // right edge is measured back from the display, and the bottom
+            // back from the panel, rather than either being extrapolated from
+            // the other window. Both used to be guessed, and at 1920x1080 the
+            // guess put this window through the middle of the terminal.
+            let panel = crate::theme::current().panel_height;
+            let monitor_width = width / 4;
+            let monitor_height = height / 3;
             let mut window = Window::new(
                 kind,
-                (width - monitor_width - 60) as isize,
-                // Clear of the terminal, and above the panel on common sizes.
-                (height * 2 / 3).saturating_sub(60) as isize,
+                (width - monitor_width - s(24)) as isize,
+                height.saturating_sub(panel + monitor_height + s(16)) as isize,
                 monitor_width,
-                height / 3,
+                monitor_height,
             );
 
             window.push(&alloc::format!("cores    {}", cpu::online()));

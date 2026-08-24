@@ -25,6 +25,8 @@ pub enum Action {
     /// Add to a numeric setting, clamped by `theme` itself.
     Step(&'static str, isize),
     NextWallpaper,
+    /// Swap between a soft finish and a flat one.
+    NextFinish,
     Save,
     Reset,
     /// Install or remove the catalogue entry at this position.
@@ -85,14 +87,17 @@ pub fn layout(
     cell_h: usize,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    let row_height = cell_h + 10;
-    let step = (row_height + 6) as isize;
-    let mut cursor = y + 6;
+    // Padding scales with the text, like everything else the desktop draws:
+    // eight pixels of margin beside a 32-pixel character reads as a mistake.
+    let scale = theme.scale;
+    let row_height = cell_h + 6 * scale;
+    let step = (row_height + 4 * scale) as isize;
+    let mut cursor = y + 6 * scale as isize;
 
-    let interior = width.saturating_sub(16);
-    let left = x + 8;
+    let interior = width.saturating_sub(16 * scale);
+    let left = x + 8 * scale as isize;
 
-    let mut heading = |items: &mut Vec<Item>, cursor: &mut isize, text: &str| {
+    let heading = |items: &mut Vec<Item>, cursor: &mut isize, text: &str| {
         items.push(Item {
             x: left,
             y: *cursor,
@@ -102,13 +107,13 @@ pub fn layout(
             style: Style::Heading,
             action: None,
         });
-        *cursor += cell_h as isize + 8;
+        *cursor += cell_h as isize + 8 * scale as isize;
     };
 
     // ---- presets, side by side ----------------------------------------
     heading(&mut items, &mut cursor, "Presets");
 
-    let gap = 6;
+    let gap = 6 * scale;
     let current = current_preset(theme);
 
     // Wide enough for the longest name plus a little air. Wrapping to as many
@@ -143,6 +148,14 @@ pub fn layout(
     row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
         "Height", Control::Step("panel.height", theme, 2));
 
+    heading(&mut items, &mut cursor, "Windows");
+    row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
+        "Finish", Control::Choice("finish", theme, Action::NextFinish));
+    row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
+        "Corners", Control::Step("window.corner", theme, 1));
+    row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
+        "Shadow", Control::Toggle("window.shadow", theme));
+
     heading(&mut items, &mut cursor, "Desktop");
     row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
         "Wallpaper", Control::Cycle(theme));
@@ -154,7 +167,7 @@ pub fn layout(
         "Status text", Control::Toggle("status", theme));
 
     // ---- save and reset ------------------------------------------------
-    cursor += 4;
+    cursor += 4 * scale as isize;
     let half = (interior - gap) / 2;
     items.push(Item {
         x: left,
@@ -178,12 +191,29 @@ pub fn layout(
     items
 }
 
+/// How tall the window's contents are, so the window can be built around them.
+///
+/// Measured by running the layout rather than by counting rows here: the two
+/// would drift the first time a setting was added, and the window would either
+/// clip its own last control or leave a band of empty space below it.
+pub fn content_height(items: &[Item], top: isize) -> usize {
+    items
+        .iter()
+        .map(|item| item.y + item.height as isize)
+        .max()
+        .map(|bottom| (bottom - top).max(0) as usize)
+        .unwrap_or(0)
+}
+
 /// The control on the right of a labelled row.
 enum Control<'a> {
     Toggle(&'static str, &'a Theme),
     /// Key, theme, and how much each press changes it by.
     Step(&'static str, &'a Theme, isize),
     Cycle(&'a Theme),
+    /// A named choice that is not on/off and not a number: shows the setting's
+    /// current value and hands the click to `action`.
+    Choice(&'static str, &'a Theme, Action),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,6 +304,20 @@ fn row(
                 action: Some(Action::NextWallpaper),
             });
         }
+
+        Control::Choice(key, theme, action) => {
+            let value = theme.get(key).unwrap_or_default();
+            let width = 11 * cell_w;
+            items.push(Item {
+                x: right - width as isize,
+                y: *cursor,
+                width,
+                height: row_height,
+                label: value,
+                style: Style::Button,
+                action: Some(action),
+            });
+        }
     }
 
     *cursor += step;
@@ -318,6 +362,14 @@ pub fn apply(action: Action) -> Option<String> {
                 // button is being held against a limit, which is not an error.
                 theme.set(key, &format!("{}", current + amount)).ok();
                 Some(())
+            });
+            None
+        }
+
+        Action::NextFinish => {
+            theme::with(|theme| {
+                let flat = theme.get("finish").as_deref() == Some("flat");
+                theme.set("finish", if flat { "soft" } else { "flat" }).ok();
             });
             None
         }

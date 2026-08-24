@@ -47,6 +47,7 @@ user/       hello, fault, selfmod — userspace ELF programs
 logo/       shared no_std crate describing the icon as code
 limine/     prebuilt Limine v11 binaries (shallow clone, carries its own .git)
 assets/     generated PNG icons
+tools/      font.py: the 8x16 console font as ASCII art, regenerates font.rs
 dist/       images staged for VirtualBox
 ```
 
@@ -75,7 +76,11 @@ the pcap. A self-consistent bug — for instance writing only one copy of the FA
 **Boot** — Limine as a UEFI application. Static `ET_EXEC` ELF at
 `0xffffffff80000000`. Communication via structs in `.limine_requests`.
 
-**Console** — framebuffer text with an 8x8 font, plus a 16550 serial log.
+**Console** — framebuffer text with an 8x16 font, plus a 16550 serial log.
+**Clock** — `clock.rs` reads the CMOS RTC; the panel and `date` both use it.
+**Notifications** — `notify.rs` is a queue anything may post to; the compositor
+drains it. Never call into the desktop from a syscall, post here instead.
+**Context menus** — `menu.rs` describes them, `desktop.rs` draws and hit-tests.
 
 **CPU** — per-core GDT and TSS with IST stacks; IDT covering every exception.
 

@@ -14,7 +14,66 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+
+/// The framebuffer's size, as reported by the bootloader.
+///
+/// Kept as plain atomics rather than behind the theme lock: `Theme::default()`
+/// needs it, and a default that could block would be a default that can
+/// deadlock. The worst a torn read could do is pick the wrong text size for
+/// one frame.
+static SCREEN_WIDTH: AtomicUsize = AtomicUsize::new(1280);
+static SCREEN_HEIGHT: AtomicUsize = AtomicUsize::new(800);
+
+/// Record the screen the desktop will be drawn on. Called once, at boot,
+/// before anything asks for a theme.
+pub fn note_screen(width: usize, height: usize) {
+    SCREEN_WIDTH.store(width, Ordering::Relaxed);
+    SCREEN_HEIGHT.store(height, Ordering::Relaxed);
+}
+
+/// How many times to repeat each pixel of the 8x16 font on this screen.
+///
+/// The font is a fixed size, so this is the only thing standing between a
+/// comfortable desktop at 1280x800 and unreadable text on a 4K panel. It is a
+/// property of the screen rather than a preference, which is why the console
+/// asks the same question: the two must agree, or the desktop's terminal
+/// window would not line up with the console the shell printed to before it.
+pub fn scale_for(_width: usize, height: usize) -> usize {
+    match height {
+        0..=1023 => 1,
+        1024..=1799 => 2,
+        _ => 3,
+    }
+}
+
+/// The boot log is about this long. The console picks a size that keeps that
+/// much on screen, because a log that has scrolled its own beginning away
+/// before anyone reads it is a log that failed at its one job.
+const CONSOLE_ROWS: usize = 34;
+
+/// The scale for the text console, which is the same as the desktop's unless
+/// that would push the boot log off the top of the screen.
+///
+/// The two are allowed to differ because they are doing different jobs: the
+/// desktop wants controls big enough to hit with a mouse, the console wants
+/// to show everything the kernel said on the way up.
+pub fn console_scale_for(width: usize, height: usize) -> usize {
+    let mut scale = scale_for(width, height);
+    while scale > 1 && height / ((crate::font::GLYPH_HEIGHT + 2) * scale) < CONSOLE_ROWS {
+        scale -= 1;
+    }
+    scale
+}
+
+/// The scale this screen calls for, before the user overrides it.
+pub fn screen_scale() -> usize {
+    scale_for(
+        SCREEN_WIDTH.load(Ordering::Relaxed),
+        SCREEN_HEIGHT.load(Ordering::Relaxed),
+    )
+}
 
 /// How the desktop background is painted.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +104,36 @@ impl Wallpaper {
             "horizontal" => Some(Wallpaper::Horizontal),
             "solid" => Some(Wallpaper::Solid),
             "grid" => Some(Wallpaper::Grid),
+            _ => None,
+        }
+    }
+}
+
+/// How surfaces are painted: with a little depth, or perfectly flat.
+///
+/// One setting rather than a dozen, because the parts have to agree. A
+/// gradient title bar above a flat panel next to a shadowless window looks
+/// like a bug rather than a choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// Gradients, rounded corners and a shadow under each window.
+    Soft,
+    /// Solid fills and square corners - what Kestrel looked like before.
+    Flat,
+}
+
+impl Finish {
+    fn name(self) -> &'static str {
+        match self {
+            Finish::Soft => "soft",
+            Finish::Flat => "flat",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "soft" => Some(Finish::Soft),
+            "flat" => Some(Finish::Flat),
             _ => None,
         }
     }
@@ -85,10 +174,21 @@ pub struct Theme {
     pub panel_at_top: bool,
     pub title_height: usize,
     pub window_border_width: usize,
+    /// Corner rounding, in unscaled pixels. Zero is a square window.
+    pub corner_radius: usize,
+    /// Whether windows cast a shadow onto whatever is behind them.
+    pub shadow: bool,
+    pub finish: Finish,
 
     // ---- content ----
     pub show_shortcuts: bool,
     pub show_status: bool,
+    /// The clock, the address and the memory gauge at the end of the panel.
+    pub show_clock: bool,
+    /// Whole hours added to the RTC, since nothing here knows about time
+    /// zones. Kept with the rest of the settings so it survives a reboot; the
+    /// clock itself is told about it whenever this changes.
+    pub clock_offset: i64,
     /// The text in the far corner of the panel. There is no clock yet, so this
     /// is whatever the user wants to say.
     pub status_text: String,
@@ -96,9 +196,16 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// The look Kestrel has always shipped with, so an empty config file and no
-    /// config file at all produce the same desktop.
+    /// The look Kestrel ships with, so an empty config file and no config file
+    /// at all produce the same desktop.
+    ///
+    /// The sizes are derived from the screen rather than fixed: a panel that is
+    /// a comfortable 34 pixels at 1280x800 is a sliver on a 4K display. Only
+    /// the colours are absolute.
     fn default() -> Self {
+        let scale = screen_scale();
+        let cell_height = (crate::font::GLYPH_HEIGHT + 2) * scale;
+
         Self {
             desktop_top: 0x2B6B9A,
             desktop_bottom: 0x15324B,
@@ -118,14 +225,19 @@ impl Default for Theme {
             cursor: 0xFFFFFF,
             cursor_edge: 0x101828,
 
-            scale: 2,
-            panel_height: 30,
+            scale,
+            panel_height: cell_height + 16 * scale,
             panel_at_top: false,
-            title_height: 20,
-            window_border_width: 1,
+            title_height: cell_height + 8 * scale,
+            window_border_width: scale,
+            corner_radius: 4,
+            shadow: true,
+            finish: Finish::Soft,
 
             show_shortcuts: true,
             show_status: true,
+            show_clock: true,
+            clock_offset: 0,
             status_text: String::from("Experimental OS"),
             wallpaper: Wallpaper::Gradient,
         }
@@ -139,7 +251,20 @@ impl Theme {
     }
 
     pub fn cell_height(&self) -> usize {
-        (crate::font::GLYPH_HEIGHT + 1) * self.scale
+        (crate::font::GLYPH_HEIGHT + 2) * self.scale
+    }
+
+    /// Corner rounding in real pixels, zero whenever the finish is flat, so
+    /// that one setting is enough to square everything off.
+    pub fn corner(&self) -> usize {
+        match self.finish {
+            Finish::Flat => 0,
+            Finish::Soft => self.corner_radius * self.scale,
+        }
+    }
+
+    pub fn soft(&self) -> bool {
+        self.finish == Finish::Soft
     }
 }
 
@@ -157,6 +282,8 @@ pub const KEYS: &[&str] = &[
     "window.title-active",
     "window.title-inactive",
     "window.title-height",
+    "window.corner",
+    "window.shadow",
     "panel.colour",
     "panel.edge",
     "panel.height",
@@ -171,8 +298,11 @@ pub const KEYS: &[&str] = &[
     "cursor.fill",
     "cursor.edge",
     "scale",
+    "finish",
     "shortcuts",
     "status",
+    "clock",
+    "clock.offset",
     "status.text",
 ];
 
@@ -192,6 +322,8 @@ impl Theme {
             "window.title-active" => colour(self.title_active),
             "window.title-inactive" => colour(self.title_inactive),
             "window.title-height" => self.title_height.to_string(),
+            "window.corner" => self.corner_radius.to_string(),
+            "window.shadow" => flag(self.shadow),
             "panel.colour" => colour(self.panel),
             "panel.edge" => colour(self.panel_edge),
             "panel.height" => self.panel_height.to_string(),
@@ -206,8 +338,11 @@ impl Theme {
             "cursor.fill" => colour(self.cursor),
             "cursor.edge" => colour(self.cursor_edge),
             "scale" => self.scale.to_string(),
+            "finish" => self.finish.name().to_string(),
             "shortcuts" => flag(self.show_shortcuts),
             "status" => flag(self.show_status),
+            "clock" => flag(self.show_clock),
+            "clock.offset" => self.clock_offset.to_string(),
             "status.text" => self.status_text.clone(),
             _ => return None,
         })
@@ -241,6 +376,10 @@ impl Theme {
             // Below the height of one line of text the title would be clipped
             // away entirely, taking the drag handle with it.
             "window.title-height" => self.title_height = number("the title bar", 12, 64)?,
+            // Past a third of the title bar the rounding starts eating the
+            // close button, which is the one control a window cannot lose.
+            "window.corner" => self.corner_radius = number("the corner radius", 0, 16)?,
+            "window.shadow" => self.shadow = parse_flag(value)?,
             "panel.colour" => self.panel = parse_colour(value)?,
             "panel.edge" => self.panel_edge = parse_colour(value)?,
             "panel.height" => self.panel_height = number("the panel", 16, 96)?,
@@ -257,7 +396,19 @@ impl Theme {
             // Beyond 4 a single character is 32 pixels wide and almost nothing
             // fits on screen; 0 would divide by zero when measuring text.
             "scale" => self.scale = number("the text scale", 1, 4)?,
+            "finish" => {
+                self.finish =
+                    Finish::parse(value).ok_or_else(|| "expected soft or flat".to_string())?
+            }
             "shortcuts" => self.show_shortcuts = parse_flag(value)?,
+            "clock" => self.show_clock = parse_flag(value)?,
+            "clock.offset" => {
+                let hours = parse_offset(value)?;
+                self.clock_offset = hours;
+                // Told immediately rather than at the next redraw, so `date`
+                // agrees with the panel the moment this is set.
+                crate::clock::set_offset_hours(hours);
+            }
             "status" => self.show_status = parse_flag(value)?,
             "status.text" => self.status_text = value.to_string(),
             _ => return Err(format!("no such setting: {key}")),
@@ -344,6 +495,16 @@ fn parse_colour(text: &str) -> Result<u32, String> {
     u32::from_str_radix(digits, 16).map_err(|_| format!("{text:?} is not a colour"))
 }
 
+/// Hours, with a sign, for a clock that has no idea what a time zone is.
+fn parse_offset(text: &str) -> Result<i64, String> {
+    let text = text.strip_prefix('+').unwrap_or(text);
+    match text.parse::<i64>() {
+        Ok(hours) if (-12..=14).contains(&hours) => Ok(hours),
+        Ok(hours) => Err(format!("the clock offset is {hours}, but must be -12 to 14")),
+        Err(_) => Err(format!("{text:?} is not a whole number of hours")),
+    }
+}
+
 fn parse_flag(text: &str) -> Result<bool, String> {
     match text.to_ascii_lowercase().as_str() {
         "on" | "yes" | "true" | "1" => Ok(true),
@@ -425,6 +586,8 @@ pub fn preset(name: &str) -> Option<Theme> {
             theme.cursor = 0xFFB84D;
             theme.cursor_edge = 0x120A02;
             theme.wallpaper = Wallpaper::Solid;
+            theme.finish = Finish::Flat;
+            theme.shadow = false;
         }
 
         "matrix" => {
@@ -446,6 +609,8 @@ pub fn preset(name: &str) -> Option<Theme> {
             theme.cursor = 0x5BE07A;
             theme.cursor_edge = 0x000000;
             theme.wallpaper = Wallpaper::Grid;
+            theme.finish = Finish::Flat;
+            theme.shadow = false;
         }
 
         _ => return None,

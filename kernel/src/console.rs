@@ -6,14 +6,7 @@ use spin::Mutex;
 
 use crate::font::{self, GLYPH_HEIGHT, GLYPH_WIDTH};
 
-/// Glyphs are 8x8, which is unreadably small at 1024x768, so double them.
-const SCALE: usize = 2;
-
-const CELL_W: usize = GLYPH_WIDTH * SCALE;
-/// One extra font row of leading, or lines with descenders run together.
-const CELL_H: usize = (GLYPH_HEIGHT + 1) * SCALE;
-
-/// Left/top inset so text isn't jammed against the bezel.
+/// Left/top inset so text isn't jammed against the bezel, in unscaled pixels.
 const MARGIN: usize = 8;
 
 pub struct Console {
@@ -25,6 +18,10 @@ pub struct Console {
     red_shift: u8,
     green_shift: u8,
     blue_shift: u8,
+    scale: usize,
+    cell_w: usize,
+    cell_h: usize,
+    margin: usize,
     cols: usize,
     rows: usize,
     col: usize,
@@ -44,6 +41,18 @@ impl Console {
     pub unsafe fn new(fb: &Framebuffer) -> Self {
         let width = fb.width as usize;
         let height = fb.height as usize;
+
+        // The glyphs are 8x16. How many times to repeat each pixel is a
+        // property of the screen, not of the font: the same magnification that
+        // reads well at 1280x800 is a postage stamp on a 4K panel. `theme`
+        // answers that for the desktop too, so there is one rule rather than
+        // two that drift.
+        let scale = crate::theme::console_scale_for(width, height);
+        let cell_w = GLYPH_WIDTH * scale;
+        // Two font rows of leading, or lines with descenders run together.
+        let cell_h = (GLYPH_HEIGHT + 2) * scale;
+        let margin = MARGIN * scale;
+
         let mut console = Self {
             base: fb.address() as *mut u8,
             width,
@@ -53,8 +62,12 @@ impl Console {
             red_shift: fb.red_mask_shift,
             green_shift: fb.green_mask_shift,
             blue_shift: fb.blue_mask_shift,
-            cols: (width - 2 * MARGIN) / CELL_W,
-            rows: (height - 2 * MARGIN) / CELL_H,
+            scale,
+            cell_w,
+            cell_h,
+            margin,
+            cols: (width - 2 * margin) / cell_w,
+            rows: (height - 2 * margin) / cell_h,
             col: 0,
             row: 0,
             fg: 0,
@@ -106,19 +119,19 @@ impl Console {
 
     fn draw_glyph(&mut self, c: u8, col: usize, row: usize) {
         let glyph = font::glyph(c);
-        let origin_x = MARGIN + col * CELL_W;
-        let origin_y = MARGIN + row * CELL_H;
+        let origin_x = self.margin + col * self.cell_w;
+        let origin_y = self.margin + row * self.cell_h;
         let (fg, bg) = (self.fg, self.bg);
 
         for (gy, bits) in glyph.iter().enumerate() {
             for gx in 0..GLYPH_WIDTH {
                 // Bit 0 is the leftmost pixel of the row.
                 let colour = if bits & (1 << gx) != 0 { fg } else { bg };
-                for sy in 0..SCALE {
-                    for sx in 0..SCALE {
+                for sy in 0..self.scale {
+                    for sx in 0..self.scale {
                         self.put_pixel(
-                            origin_x + gx * SCALE + sx,
-                            origin_y + gy * SCALE + sy,
+                            origin_x + gx * self.scale + sx,
+                            origin_y + gy * self.scale + sy,
                             colour,
                         );
                     }
@@ -129,8 +142,8 @@ impl Console {
 
     /// Move every text row up by one and blank the last one.
     fn scroll(&mut self) {
-        let row_bytes = CELL_H * self.pitch;
-        let top = MARGIN * self.pitch;
+        let row_bytes = self.cell_h * self.pitch;
+        let top = self.margin * self.pitch;
         let text_bytes = self.rows * row_bytes;
 
         unsafe {
@@ -141,9 +154,9 @@ impl Console {
             );
         }
 
-        let last_row_y = MARGIN + (self.rows - 1) * CELL_H;
+        let last_row_y = self.margin + (self.rows - 1) * self.cell_h;
         let bg = self.bg;
-        for y in last_row_y..last_row_y + CELL_H {
+        for y in last_row_y..last_row_y + self.cell_h {
             for x in 0..self.width {
                 self.put_pixel(x, y, bg);
             }
@@ -164,8 +177,8 @@ impl Console {
     pub fn draw_logo(&mut self, size: usize) {
         const SAMPLES: usize = 3;
 
-        let left = MARGIN;
-        let top = MARGIN;
+        let left = self.margin;
+        let top = self.margin;
 
         for y in 0..size {
             for x in 0..size {
@@ -194,7 +207,7 @@ impl Console {
         }
 
         // Continue text below the mark.
-        self.row = (top + size).div_ceil(CELL_H) + 1;
+        self.row = (top + size).div_ceil(self.cell_h) + 1;
         self.col = 0;
     }
 

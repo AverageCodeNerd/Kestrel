@@ -13,6 +13,7 @@ mod ahci;
 mod allocator;
 mod apic;
 mod console;
+mod clock;
 mod cpu;
 mod desktop;
 mod elf;
@@ -24,8 +25,10 @@ mod hhdm;
 mod interrupts;
 mod keyboard;
 mod memory;
+mod menu;
 mod mouse;
 mod net;
+mod notify;
 mod pci;
 mod pic;
 mod power;
@@ -131,6 +134,10 @@ pub extern "C" fn kmain() -> ! {
 
     if let Some(response) = FRAMEBUFFER.response() {
         if let Some(fb) = response.framebuffers().first() {
+            // Before the console, because how large a character is depends on
+            // how large the screen is, and both of them ask `theme` that.
+            theme::note_screen(fb.width as usize, fb.height as usize);
+
             let console = unsafe { Console::new(fb) };
             *CONSOLE.lock() = Some(console);
         }
@@ -167,6 +174,20 @@ pub extern "C" fn kmain() -> ! {
     // Only after interrupts and the heap are up: each core needs the shared
     // IDT and the calibrated timer rate before it can run.
     smp::init();
+
+    // After the timer, whose ticks carry the time forward between readings.
+    match clock::init() {
+        Some(now) => println!(
+            "clock        : {} {} {} {:02}:{:02}:{:02} UTC",
+            clock::weekday(&now),
+            now.day,
+            clock::MONTHS[(now.month.clamp(1, 12) - 1) as usize],
+            now.hour,
+            now.minute,
+            now.second
+        ),
+        None => println!("clock        : no RTC - times will read as unknown"),
+    }
 
     vfs::init();
     println!("ramdisk      : mounted at /");
@@ -435,8 +456,10 @@ fn start_interrupts() {
 }
 
 fn banner() {
-    // The mark first, with the boot log flowing beneath it.
-    print::logo(96);
+    // The mark first, with the boot log flowing beneath it. Sized from the
+    // screen rather than fixed: 96 pixels is a badge on a 1280x800 display and
+    // a postage stamp on a 4K one.
+    print::logo(96 * theme::screen_scale());
 
     if let Some(console) = CONSOLE.lock().as_mut() {
         console.set_fg(0x7A, 0xC7, 0xFF);

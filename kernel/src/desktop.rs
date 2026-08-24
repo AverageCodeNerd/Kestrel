@@ -15,19 +15,29 @@ use crate::font;
 use crate::settings;
 use crate::theme::{Theme, Wallpaper};
 
-/// Fixed layout, in pixels, that nothing gains from making configurable.
-const LAUNCHER_X: isize = 6;
-const LAUNCHER_BUTTON_X: isize = 6;
-/// Derived from the list itself, so adding a window kind grows the menu
-/// instead of leaving the last entry drawn outside its own box.
-const LAUNCHER_ENTRIES: usize = Kind::ALL.len();
+/// One line in the launcher: a window it can open, or a program it can run.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Target {
+    Window(Kind),
+    /// An installed package, run by name the way `exec` runs it.
+    Program(String),
+}
 
-/// Desktop shortcuts: a square icon with two lines of text beside it.
-const SHORTCUT_X: isize = 18;
-const SHORTCUT_TOP: isize = 20;
-const SHORTCUT_SECOND_TOP: isize = 98;
-const SHORTCUT_ICON: usize = 48;
-const SHORTCUT_LABEL_X: isize = 58;
+#[derive(Clone)]
+pub struct LauncherEntry {
+    pub name: String,
+    pub detail: String,
+    pub target: Target,
+}
+
+/// The gap that separates everything from everything else, in unscaled pixels.
+/// One number so the desktop has one rhythm rather than a dozen near misses.
+const GAP: usize = 6;
+
+/// The pointer bitmap is this many pixels square before magnification. The
+/// damage region and the drawing both derive from it, or the arrow leaves a
+/// trail of its own top-left corner behind.
+const CURSOR_SIZE: usize = 12;
 
 /// Layout derived from the theme.
 ///
@@ -37,64 +47,112 @@ const SHORTCUT_LABEL_X: isize = 58;
 /// the hit tests drifting apart — the bug this file has produced most often.
 #[derive(Clone, Copy)]
 struct Metrics {
+    /// How many screen pixels one font pixel occupies. Every measurement below
+    /// is a multiple of it, which is what makes the desktop the same size on a
+    /// 4K panel as on a 1280x800 one instead of a quarter of it.
+    scale: usize,
     cell_w: usize,
     cell_h: usize,
+    /// The standard gap, scaled.
+    gap: isize,
     title_height: usize,
     panel_height: usize,
     panel_at_top: bool,
     border: usize,
+    /// Corner rounding in real pixels, and zero for a flat theme.
+    corner: usize,
+    /// Gradients and rounding, or solid fills and square edges.
+    soft: bool,
+    /// How far a window's shadow reaches, and zero when it casts none. Damage
+    /// rectangles have to allow for it or a dragged window smears its own
+    /// shadow across the wallpaper.
+    shadow: usize,
 
     task_width: usize,
     task_step: isize,
     task_strip_x: isize,
+    launcher_x: isize,
     launcher_button_width: usize,
 
     launcher_width: usize,
     launcher_row_height: usize,
     launcher_row_step: isize,
     launcher_header: isize,
-    launcher_height: usize,
 
+    /// Desktop shortcuts: a square icon with two lines of text beside it.
+    shortcut_x: isize,
+    shortcut_top: isize,
+    shortcut_step: isize,
+    shortcut_icon: usize,
+    shortcut_label_x: isize,
     shortcut_label_width: usize,
+}
+
+/// The longest line the launcher menu has to show, in characters.
+fn longest_entry() -> usize {
+    Kind::ALL
+        .iter()
+        .map(|kind| kind.title().len().max(kind.description().len()))
+        .max()
+        .unwrap_or(16)
 }
 
 impl Metrics {
     fn from(theme: &Theme) -> Self {
+        let scale = theme.scale;
         let cell_w = theme.cell_width();
         let cell_h = theme.cell_height();
+        let gap = (GAP * scale) as isize;
 
         // Wide enough for an eight-character name plus padding, so the common
         // window titles are not abbreviated in the panel.
-        let task_width = 8 * cell_w + 14;
+        let task_width = 8 * cell_w + 14 * scale;
         // Sized to actually fit "Kestrel" rather than clipping the name.
-        let launcher_button_width = 7 * cell_w + 12;
+        let launcher_button_width = 7 * cell_w + 12 * scale;
 
-        let launcher_row_height = 2 * cell_h + 4;
-        let launcher_row_step = launcher_row_height as isize + 6;
-        let launcher_header = cell_h as isize + 16;
+        let launcher_row_height = 2 * cell_h + 4 * scale;
+        let launcher_row_step = launcher_row_height as isize + gap;
+        let launcher_header = cell_h as isize + 16 * scale as isize;
+
+        let launcher_x = gap;
+        let shortcut_icon = 40 * scale;
 
         Self {
+            scale,
             cell_w,
             cell_h,
+            gap,
             title_height: theme.title_height,
             panel_height: theme.panel_height,
             panel_at_top: theme.panel_at_top,
             border: theme.window_border_width,
+            corner: theme.corner(),
+            soft: theme.soft(),
+            // Deliberately generous: a shadow that fades to nothing needs room
+            // to fade in, and the cost is paid only where a window overlaps
+            // what is behind it.
+            shadow: if theme.shadow && theme.soft() { 6 * scale } else { 0 },
 
             task_width,
-            task_step: task_width as isize + 6,
-            task_strip_x: LAUNCHER_BUTTON_X + launcher_button_width as isize + 8,
+            task_step: task_width as isize + gap,
+            task_strip_x: launcher_x + launcher_button_width as isize + gap + gap / 2,
+            launcher_x,
             launcher_button_width,
 
-            // Holds the longest entry name at the current scale.
-            launcher_width: 20 * cell_w,
+            // Wide enough for the longest thing it has to say, measured from
+            // the entries themselves. A round twenty columns fitted the names
+            // but clipped every description to "Change how this~".
+            launcher_width: (longest_entry() + 4) * cell_w,
             launcher_row_height,
             launcher_row_step,
             launcher_header,
-            launcher_height: launcher_header as usize
-                + LAUNCHER_ENTRIES * launcher_row_step as usize
-                + 6,
 
+            shortcut_x: 18 * scale as isize,
+            shortcut_top: 20 * scale as isize,
+            // Icon plus two lines of label plus breathing room.
+            shortcut_step: (shortcut_icon + 26 * scale) as isize,
+            shortcut_icon,
+            shortcut_label_x: (shortcut_icon + 10 * scale) as isize,
             shortcut_label_width: 8 * cell_w,
         }
     }
@@ -226,12 +284,14 @@ impl Window {
 
     /// The close button's square, at the right end of the title bar.
     ///
-    /// Inset by two pixels so it does not sit flush against the frame, and
-    /// square so it stays proportionate as the title bar is resized.
+    /// A fraction of the title bar rather than a fixed inset from it, so it
+    /// stays the same shape at every text scale: subtracting a constant made
+    /// it very nearly as tall as the whole bar once the bar itself scaled.
     fn close_button(&self) -> (isize, isize, usize) {
-        let size = self.title_height.saturating_sub(8).max(8);
-        let x = self.x + self.width as isize - size as isize - 4;
-        let y = self.y + (self.title_height as isize - size as isize) / 2;
+        let size = (self.title_height * 5 / 9).max(8);
+        let margin = (self.title_height as isize - size as isize) / 2;
+        let x = self.x + self.width as isize - size as isize - margin;
+        let y = self.y + margin;
         (x, y, size)
     }
 
@@ -277,6 +337,41 @@ pub struct Desktop {
     damage: Option<Damage>,
     /// Active only while drawing a damaged region.
     clip: Option<Damage>,
+    /// What the launcher is currently offering, already filtered by `search`.
+    ///
+    /// Rebuilt when the launcher opens and whenever the query changes, rather
+    /// than recomputed per frame: the menu's height depends on how many
+    /// entries there are, and a list that changed between drawing and hit
+    /// testing would put the rows somewhere other than where they were drawn.
+    launcher_items: Vec<LauncherEntry>,
+    /// What has been typed into the launcher's search field.
+    search: String,
+    /// The entry the keyboard is on, as opposed to the one the pointer is on.
+    selected: usize,
+    /// A program the user picked from the launcher. Run by the shell, outside
+    /// the compositor's lock, for the same reason everything else here is.
+    run_request: Option<String>,
+    /// The open context menu, if any: where it is and what is in it.
+    menu: Option<(isize, isize, Vec<crate::menu::Item>)>,
+    /// The menu entry the pointer is over.
+    menu_hover: Option<usize>,
+    /// Kept locally so one held right button produces exactly one menu.
+    right_was_down: bool,
+    /// Notifications currently on screen, oldest first. Drained from
+    /// `notify`'s queue rather than pushed here, so anything in the kernel can
+    /// raise one without touching the compositor's lock.
+    notifications: Vec<crate::notify::Notification>,
+    /// The rectangle the stack occupied when it was last drawn, so a card
+    /// that expires erases exactly what it used to cover.
+    notification_rect: Option<Damage>,
+    /// The hour and minute the panel is currently showing, so the clock can
+    /// be redrawn when it changes and only then. Without this the desktop
+    /// would either repaint every frame to keep a clock ticking, or show the
+    /// time it happened to start at forever.
+    clock_shown: Option<(u8, u8)>,
+    /// The launcher row the pointer is over, so exactly one row is
+    /// highlighted and it is the one a click would choose.
+    hovered_entry: Option<usize>,
     /// A window the user clicked for in the launcher that is not open yet.
     open_request: Option<Kind>,
     /// Something the desktop wants said in the terminal. Collected here rather
@@ -327,6 +422,17 @@ impl Desktop {
                 height,
             }),
             clip: None,
+            launcher_items: Vec::new(),
+            search: String::new(),
+            selected: 0,
+            run_request: None,
+            menu: None,
+            menu_hover: None,
+            right_was_down: false,
+            notifications: Vec::new(),
+            notification_rect: None,
+            clock_shown: None,
+            hovered_entry: None,
             open_request: None,
             notice: None,
             theme,
@@ -552,14 +658,129 @@ impl Desktop {
         }
     }
 
+    /// How tall the launcher is, which depends on how much it is offering.
+    ///
+    /// Everything that positions or hit-tests the launcher goes through this
+    /// and `launcher_width`, so filtering the list moves the menu rather than
+    /// leaving rows drawn outside it.
+    fn launcher_height(&self) -> usize {
+        let rows = self.launcher_items.len().max(1);
+        self.m.launcher_header as usize + rows * self.m.launcher_row_step as usize + GAP * self.m.scale
+    }
+
+    fn launcher_width(&self) -> usize {
+        let longest = self
+            .launcher_items
+            .iter()
+            .map(|entry| entry.name.chars().count().max(entry.detail.chars().count()))
+            .chain(core::iter::once(longest_entry()))
+            .max()
+            .unwrap_or(20);
+
+        ((longest + 4) * self.m.cell_w).max(self.m.launcher_width)
+    }
+
     /// Y coordinate of the launcher's top edge, opening away from the panel.
     fn launcher_y(&self) -> isize {
         if self.m.panel_at_top {
             self.m.panel_height as isize + 4
         } else {
             self.height
-                .saturating_sub(self.m.panel_height + 4 + self.m.launcher_height) as isize
+                .saturating_sub(self.m.panel_height + 4 + self.launcher_height()) as isize
         }
+    }
+
+    /// Everything the launcher can offer, filtered by what has been typed.
+    ///
+    /// Windows first, since they are always there, then whatever is installed.
+    /// Both are matched on their name, so typing "sn" finds Snake and typing
+    /// "set" finds Settings.
+    fn build_launcher_items(&mut self) {
+        let query = self.search.to_ascii_lowercase();
+        let matches = |name: &str| {
+            query.is_empty() || name.to_ascii_lowercase().contains(query.as_str())
+        };
+
+        let mut items = Vec::new();
+
+        for kind in Kind::ALL {
+            if matches(kind.title()) {
+                items.push(LauncherEntry {
+                    name: String::from(kind.title()),
+                    detail: String::from(kind.description()),
+                    target: Target::Window(kind),
+                });
+            }
+        }
+
+        // Installed packages, which is what makes the search worth having:
+        // the four windows fit on screen, the programs will not always.
+        for package in crate::store::catalogue() {
+            if crate::store::is_installed(&package.name) && matches(&package.name) {
+                items.push(LauncherEntry {
+                    name: package.name.clone(),
+                    detail: package.summary.clone(),
+                    target: Target::Program(package.name),
+                });
+            }
+        }
+
+        self.selected = self.selected.min(items.len().saturating_sub(1));
+        self.launcher_items = items;
+    }
+
+    /// Open the launcher, or close it if it is already open.
+    fn toggle_launcher(&mut self) {
+        let previous = self.launcher_region();
+        self.launcher_open = !self.launcher_open;
+
+        if self.launcher_open {
+            self.search.clear();
+            self.selected = 0;
+            self.build_launcher_items();
+        } else {
+            self.hovered_entry = None;
+        }
+
+        self.invalidate(previous);
+        let region = self.launcher_region();
+        self.invalidate(region);
+    }
+
+    fn close_launcher(&mut self) {
+        if !self.launcher_open {
+            return;
+        }
+        let region = self.launcher_region();
+        self.launcher_open = false;
+        self.hovered_entry = None;
+        self.search.clear();
+        self.invalidate(region);
+    }
+
+    /// Act on a launcher entry: raise a window, or ask for a program to run.
+    fn activate_entry(&mut self, index: usize) {
+        let Some(entry) = self.launcher_items.get(index).cloned() else {
+            return;
+        };
+        self.close_launcher();
+
+        match entry.target {
+            Target::Window(kind) => match self.find(kind) {
+                // Focus it if it is open, otherwise ask for it to be opened -
+                // which is what makes closing a window recoverable rather
+                // than permanent.
+                Some(index) => self.focused = index,
+                None => self.open_request = Some(kind),
+            },
+            Target::Program(name) => self.run_request = Some(name),
+        }
+        self.invalidate_all();
+    }
+
+    /// A program the user asked for, taken by the shell to run.
+    pub fn take_run_request(&mut self) -> Option<String> {
+        self.run_request.take()
     }
 
     fn plot(&mut self, x: usize, y: usize, colour: u32) {
@@ -595,6 +816,190 @@ impl Desktop {
         for py in start_y..end_y {
             for px in start_x..end_x {
                 self.buffer[py * self.width + px] = colour;
+            }
+        }
+    }
+
+    /// Mix `colour` into what is already in the buffer, `alpha` out of 255.
+    ///
+    /// Everything with a soft edge goes through here: shadows, rounded
+    /// corners, the cursor's outline. It reads the buffer back, which is only
+    /// sound because the compositor draws strictly back to front - whatever is
+    /// underneath has already been painted by the time anything blends onto
+    /// it.
+    fn blend(&mut self, x: isize, y: isize, colour: u32, alpha: u32) {
+        if alpha == 0 || x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        if let Some(clip) = self.clip {
+            if x < clip.x || x >= clip.x + clip.width || y < clip.y || y >= clip.y + clip.height {
+                return;
+            }
+        }
+
+        if alpha >= 255 {
+            self.buffer[y * self.width + x] = colour;
+            return;
+        }
+
+        let dst = self.buffer[y * self.width + x];
+        let inverse = 255 - alpha;
+        let channel = |shift: u32| {
+            let a = (dst >> shift) & 0xFF;
+            let b = (colour >> shift) & 0xFF;
+            ((a * inverse + b * alpha) / 255) & 0xFF
+        };
+        self.buffer[y * self.width + x] = channel(16) << 16 | channel(8) << 8 | channel(0);
+    }
+
+    /// How much of the pixel at (`dx`, `dy`) from a corner's centre is inside
+    /// a circle of radius `radius`, as an alpha.
+    ///
+    /// Sampled on a 4x4 grid rather than measured, because measuring wants a
+    /// square root and the kernel has no floating-point library - only
+    /// comparisons of squares, which need none.
+    fn corner_alpha(dx: isize, dy: isize, radius: isize) -> u32 {
+        // Distances are in quarter-pixels, then doubled, so that a sample
+        // centre lands on a whole number and the comparison stays in integers.
+        let limit = (8 * radius) as i64 * (8 * radius) as i64;
+        let mut inside = 0;
+
+        for sub_y in 0..4 {
+            for sub_x in 0..4 {
+                let u = (2 * (4 * dx + sub_x) + 1) as i64;
+                let v = (2 * (4 * dy + sub_y) + 1) as i64;
+                if u * u + v * v <= limit {
+                    inside += 1;
+                }
+            }
+        }
+        inside * 255 / 16
+    }
+
+    /// How far a row is set in from the straight edge, inside a rounded corner.
+    ///
+    /// Shared by the fill and by anything that has to stay inside one - a
+    /// program's window paints its own pixels right up to the frame, and
+    /// without this it would square off the corners the frame just rounded.
+    fn round_inset(radius: isize, from_edge: isize) -> isize {
+        if radius <= 0 || from_edge >= radius {
+            return 0;
+        }
+        let dy = radius - from_edge - 1;
+        let mut inset = 0;
+        while inset < radius {
+            let dx = radius - inset - 1;
+            if dx * dx + dy * dy <= radius * radius {
+                break;
+            }
+            inset += 1;
+        }
+        inset
+    }
+
+    /// A filled rectangle whose colour blends from `top` to `bottom` and whose
+    /// corners are rounded by `radius`.
+    ///
+    /// Every surface on the desktop is one of these: pass the same colour
+    /// twice for a flat fill, and zero for square corners. Keeping it to one
+    /// routine is what stops a flat theme from acquiring a stray gradient in
+    /// one place and not another.
+    fn fill_surface(
+        &mut self,
+        x: isize,
+        y: isize,
+        width: usize,
+        height: usize,
+        top: u32,
+        bottom: u32,
+        corners: (usize, usize),
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let limit = (width / 2).min(height / 2);
+        // Separate radii because most surfaces here are rounded at one end
+        // only: a title bar meets the window body, and rounding that join
+        // leaves the frame showing through as two notches.
+        let (round_top, round_bottom) = (corners.0.min(limit) as isize, corners.1.min(limit) as isize);
+
+        for row in 0..height {
+            let colour = if top == bottom {
+                top
+            } else {
+                logo::blend(top, bottom, row as f32 / height.max(1) as f32)
+            };
+
+            // How far this row is into a rounded corner, if at all.
+            let upper = row < height / 2;
+            let radius = if upper { round_top } else { round_bottom };
+            let from_edge = if upper { row } else { height - 1 - row } as isize;
+            if radius == 0 || from_edge >= radius {
+                self.fill(x, y + row as isize, width, 1, colour);
+                continue;
+            }
+
+            // The circle's centre for this corner, measured from the outermost
+            // row and column of the rectangle.
+            let dy = radius - from_edge - 1;
+            let inset = Self::round_inset(radius, from_edge);
+
+            let span = width.saturating_sub(2 * inset as usize);
+            self.fill(x + inset, y + row as isize, span, 1, colour);
+
+            // The pixel where the arc crosses this row is partly covered; the
+            // rest of the edge is either wholly in or wholly out.
+            if inset > 0 {
+                let alpha = Self::corner_alpha(radius - inset, dy, radius);
+                self.blend(x + inset - 1, y + row as isize, colour, alpha);
+                self.blend(
+                    x + width as isize - inset,
+                    y + row as isize,
+                    colour,
+                    alpha,
+                );
+            }
+        }
+    }
+
+    /// A soft shadow cast by the rectangle `(x, y, width, height)`.
+    ///
+    /// Drawn before the thing casting it, and offset downwards, so the desktop
+    /// reads as lit from above. The falloff is squared - a linear one looks
+    /// like a grey border rather than a shadow.
+    fn draw_shadow(&mut self, x: isize, y: isize, width: usize, height: usize, extent: usize) {
+        if extent == 0 || width == 0 || height == 0 {
+            return;
+        }
+        let reach = extent as isize;
+        let drop = reach / 2;
+        let (left, top) = (x, y + drop);
+        let (right, bottom) = (x + width as isize, y + drop + height as isize);
+
+        for py in (top - reach)..(bottom + reach) {
+            for px in (left - reach)..(right + reach) {
+                // Distance outside the rectangle, on each axis.
+                let dx = (left - px).max(px - right + 1).max(0);
+                let dy = (top - py).max(py - bottom + 1).max(0);
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+
+                // An octagonal approximation of the distance: near enough for
+                // something whose whole purpose is to be indistinct, and it
+                // needs no square root.
+                let far = dx.max(dy) + dx.min(dy) / 2;
+                if far >= reach {
+                    continue;
+                }
+
+                let fade = (reach - far) as u32;
+                let alpha = 70 * fade * fade / (reach * reach) as u32;
+                self.blend(px, py, 0x000000, alpha);
             }
         }
     }
@@ -647,7 +1052,23 @@ impl Desktop {
             return;
         };
         let (x, y, width, height) = (window.x, window.y, window.width, window.height);
-        self.invalidate_rect(x, y, width, height);
+        self.invalidate_window_rect(x, y, width, height);
+    }
+
+    /// A window's rectangle plus the shadow it casts around it.
+    ///
+    /// Windows paint outside themselves now. A region that stopped at the
+    /// frame would leave the shadow of a dragged window printed on the
+    /// wallpaper behind it, which is exactly the class of smear this file's
+    /// damage tracking exists to avoid.
+    fn invalidate_window_rect(&mut self, x: isize, y: isize, width: usize, height: usize) {
+        let reach = self.m.shadow as isize * 2;
+        self.invalidate_rect(
+            x - reach,
+            y - reach,
+            width + 2 * reach as usize,
+            height + 2 * reach as usize,
+        );
     }
 
     fn invalidate_all(&mut self) {
@@ -659,12 +1080,478 @@ impl Desktop {
         });
     }
 
-    fn launcher_region(&self) -> Option<Damage> {
+    /// Offer a keystroke to the desktop before the shell sees it.
+    ///
+    /// Returns true when the desktop used it. Escape is the whole reason this
+    /// exists: it has always meant "leave the desktop", and now it has to mean
+    /// "close whatever is open" first, or a menu would be impossible to
+    /// dismiss without also throwing away the desktop behind it.
+    pub fn take_key(&mut self, byte: u8) -> bool {
+        use crate::keyboard::{KEY_DOWN, KEY_ESCAPE, KEY_UP};
+
+        if byte == KEY_ESCAPE && self.menu.is_some() {
+            self.close_menu();
+            return true;
+        }
+
+        if !self.launcher_open {
+            return false;
+        }
+
+        // With the launcher open the keyboard belongs to it. Anything it does
+        // not want falls through to the shell, so a keystroke is never lost.
+        let previous = self.launcher_region();
+        match byte {
+            KEY_ESCAPE => {
+                self.close_launcher();
+                return true;
+            }
+            b'\n' => {
+                let selected = self.selected;
+                self.activate_entry(selected);
+                return true;
+            }
+            KEY_UP => self.selected = self.selected.saturating_sub(1),
+            KEY_DOWN => {
+                let last = self.launcher_items.len().saturating_sub(1);
+                self.selected = (self.selected + 1).min(last);
+            }
+            0x08 => {
+                if self.search.pop().is_none() {
+                    return true;
+                }
+                self.selected = 0;
+                self.build_launcher_items();
+            }
+            byte if (0x20..=0x7E).contains(&byte) => {
+                self.search.push(byte as char);
+                self.selected = 0;
+                self.build_launcher_items();
+            }
+            _ => return false,
+        }
+
+        // The list may have grown or shrunk, so both the old rectangle and the
+        // new one need repainting.
+        self.invalidate(previous);
+        let region = self.launcher_region();
+        self.invalidate(region);
+        true
+    }
+
+    /// Carry out a menu choice.
+    ///
+    /// Opening a window and repainting are the compositor's own business; the
+    /// rest belongs to `menu`, which reports back whether the theme changed.
+    fn run_menu_action(&mut self, action: crate::menu::Action) {
+        use crate::menu::Action;
+
+        match action {
+            Action::Refresh => self.invalidate_all(),
+            Action::Open(kind) => match self.find(kind) {
+                Some(index) => {
+                    self.focused = index;
+                    self.invalidate_all();
+                }
+                None => self.open_request = Some(kind),
+            },
+            other => {
+                if crate::menu::apply(other) {
+                    self.apply_theme(crate::theme::current());
+                }
+            }
+        }
+    }
+
+    /// Open a context menu at `(x, y)`, nudged so it always fits on screen.
+    fn open_menu(&mut self, x: isize, y: isize, items: Vec<crate::menu::Item>) {
+        self.close_menu();
+
+        let (width, height) = self.menu_size(&items);
+        // A menu opened near the right or bottom edge grows the other way,
+        // which is what every desktop does and what stops the entries running
+        // off the screen where they cannot be clicked.
+        let x = x.min(self.width as isize - width as isize - self.m.gap).max(0);
+        let y = y.min(self.height as isize - height as isize - self.m.gap).max(0);
+
+        self.menu = Some((x, y, items));
+        self.menu_hover = None;
+        let region = self.menu_region();
+        self.invalidate(region);
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu.is_none() {
+            return;
+        }
+        let region = self.menu_region();
+        self.menu = None;
+        self.menu_hover = None;
+        self.invalidate(region);
+    }
+
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    fn menu_row_height(&self) -> usize {
+        self.m.cell_h + 8 * self.m.scale
+    }
+
+    fn menu_separator_height(&self) -> usize {
+        6 * self.m.scale
+    }
+
+    fn menu_size(&self, items: &[crate::menu::Item]) -> (usize, usize) {
+        let longest = items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(8);
+
+        let mut height = 2 * self.m.scale;
+        for item in items {
+            height += if item.is_separator() {
+                self.menu_separator_height()
+            } else {
+                self.menu_row_height()
+            };
+        }
+        height += 2 * self.m.scale;
+
+        ((longest + 4) * self.m.cell_w, height)
+    }
+
+    /// Where each entry sits. The one description of the menu's geometry.
+    fn menu_rows(&self) -> Vec<(usize, Damage)> {
+        let Some((x, y, items)) = self.menu.as_ref() else {
+            return Vec::new();
+        };
+        let (width, _) = self.menu_size(items);
+
+        let mut out = Vec::new();
+        let mut cursor = *y + 2 * self.m.scale as isize;
+
+        for (index, item) in items.iter().enumerate() {
+            let height = if item.is_separator() {
+                self.menu_separator_height()
+            } else {
+                self.menu_row_height()
+            };
+
+            if let Some(rect) = self.region(*x, cursor, width, height) {
+                out.push((index, rect));
+            }
+            cursor += height as isize;
+        }
+        out
+    }
+
+    /// The menu's rectangle, widened for its shadow.
+    fn menu_region(&self) -> Option<Damage> {
+        let (x, y, items) = self.menu.as_ref()?;
+        let (width, height) = self.menu_size(items);
+        let reach = self.m.shadow as isize * 2;
         self.region(
-            LAUNCHER_X,
-            self.launcher_y(),
-            self.m.launcher_width,
-            self.m.launcher_height,
+            *x - reach,
+            *y - reach,
+            width + 2 * reach as usize,
+            height + 2 * reach as usize,
+        )
+    }
+
+    /// Which entry `(x, y)` falls on, skipping separators.
+    fn menu_entry_at(&self, x: isize, y: isize) -> Option<usize> {
+        let items = self.menu.as_ref().map(|(_, _, items)| items)?;
+
+        self.menu_rows()
+            .into_iter()
+            .find(|(index, rect)| {
+                !items[*index].is_separator()
+                    && x >= rect.x as isize
+                    && x < (rect.x + rect.width) as isize
+                    && y >= rect.y as isize
+                    && y < (rect.y + rect.height) as isize
+            })
+            .map(|(index, _)| index)
+    }
+
+    /// Whether `(x, y)` is anywhere over the menu, separators included.
+    fn in_menu(&self, x: isize, y: isize) -> bool {
+        let Some((left, top, items)) = self.menu.as_ref() else {
+            return false;
+        };
+        let (width, height) = self.menu_size(items);
+        x >= *left && x < *left + width as isize && y >= *top && y < *top + height as isize
+    }
+
+    fn draw_menu(&mut self) {
+        let Some((x, y, items)) = self.menu.as_ref() else {
+            return;
+        };
+        let (x, y) = (*x, *y);
+        let (width, height) = self.menu_size(items);
+
+        let base = self.theme.launcher;
+        let light = self.theme.light_text;
+        let selected = self.theme.launcher_selected;
+        let edge = self.theme.panel_edge;
+        let corner = self.m.corner;
+        let soft = self.m.soft;
+        let hover = self.menu_hover;
+
+        // Collected first: drawing borrows self mutably, and the menu is
+        // borrowed from it.
+        let rows: Vec<(usize, Damage, bool, String)> = self
+            .menu_rows()
+            .into_iter()
+            .filter_map(|(index, rect)| {
+                let item = items.get(index)?;
+                Some((index, rect, item.is_separator(), item.label.clone()))
+            })
+            .collect();
+
+        if self.m.shadow > 0 {
+            self.draw_shadow(x, y, width, height, self.m.shadow);
+        }
+        let bottom = if soft { logo::blend(base, 0x000000, 0.10) } else { base };
+        self.fill_surface(x, y, width, height, base, bottom, (corner, corner));
+
+        let pad = 10 * self.m.scale as isize;
+        for (index, rect, separator, label) in rows {
+            if separator {
+                // A hairline the width of the menu, inset so it reads as a
+                // divider rather than a border.
+                self.fill(
+                    x + pad,
+                    rect.y as isize + (rect.height / 2) as isize,
+                    width - 2 * pad as usize,
+                    self.m.scale,
+                    edge,
+                );
+                continue;
+            }
+
+            let hovered = hover == Some(index);
+            if hovered {
+                let (top, bottom) = if soft {
+                    (
+                        logo::blend(selected, 0xFFFFFF, 0.10),
+                        logo::blend(selected, 0x000000, 0.10),
+                    )
+                } else {
+                    (selected, selected)
+                };
+                self.fill_surface(
+                    x + 2 * self.m.scale as isize,
+                    rect.y as isize,
+                    width - 4 * self.m.scale,
+                    rect.height,
+                    top,
+                    bottom,
+                    (corner / 2, corner / 2),
+                );
+            }
+
+            let text_y = rect.y as isize + (rect.height as isize - self.m.cell_h as isize) / 2;
+            self.draw_text_within(x + pad, text_y, &label, light, width - 2 * pad as usize);
+        }
+    }
+
+    /// Take anything newly posted, and retire anything that has had its time.
+    ///
+    /// Called at the top of every frame. Both halves are damage: a card
+    /// arriving has to be painted, and a card leaving has to be erased from
+    /// exactly where it was, which is what `notification_rect` remembers.
+    fn service_notifications(&mut self) {
+        let now = crate::apic::ticks();
+        let before = self.notifications.len();
+
+        if crate::notify::pending() {
+            self.notifications.extend(crate::notify::drain());
+        }
+
+        // Oldest first, so this is a prefix and the newest card never jumps.
+        self.notifications
+            .retain(|item| now.saturating_sub(item.posted) < crate::notify::LIFETIME_TICKS);
+
+        // Three at a time. More than that and they are a wall rather than a
+        // message, and the oldest is the one nobody is still reading.
+        while self.notifications.len() > 3 {
+            self.notifications.remove(0);
+        }
+
+        if self.notifications.len() != before {
+            let previous = self.notification_rect;
+            let current = self.notification_bounds();
+            self.invalidate(previous);
+            self.invalidate(current);
+            self.notification_rect = current;
+        }
+    }
+
+    /// Where each card sits, newest nearest the panel.
+    ///
+    /// The one description of the stack's geometry: drawing walks it and so
+    /// does dismissal, so a card cannot be shown in one place and closed from
+    /// another.
+    fn notification_cards(&self) -> Vec<(usize, Damage)> {
+        let pad = 10 * self.m.scale;
+        let card_width = (32 * self.m.cell_w).min(self.width / 3).max(self.m.cell_w * 12);
+        let columns = ((card_width - 2 * pad) / self.m.cell_w.max(1)).max(8);
+        let left = self.width.saturating_sub(card_width + 2 * self.m.gap as usize);
+
+        // Cards grow away from the panel, whichever edge it is on.
+        let downwards = self.m.panel_at_top;
+        let mut edge = if downwards {
+            self.panel_y() + self.m.panel_height as isize + self.m.gap
+        } else {
+            self.panel_y() - self.m.gap
+        };
+
+        let mut out = Vec::new();
+        for (index, item) in self.notifications.iter().enumerate().rev() {
+            let lines = wrap(&item.body, columns).len().max(1);
+            let height = (lines + 1) * self.m.cell_h + 2 * pad;
+
+            let top = if downwards { edge } else { edge - height as isize };
+            let Some(rect) = self.region(left as isize, top, card_width, height) else {
+                continue;
+            };
+            out.push((index, rect));
+
+            edge = if downwards {
+                edge + height as isize + self.m.gap
+            } else {
+                top - self.m.gap
+            };
+        }
+        out
+    }
+
+    /// The whole stack's rectangle, widened for the shadow it casts.
+    fn notification_bounds(&self) -> Option<Damage> {
+        let cards = self.notification_cards();
+        let first = cards.first()?.1;
+
+        let mut left = first.x;
+        let mut top = first.y;
+        let mut right = first.x + first.width;
+        let mut bottom = first.y + first.height;
+
+        for (_, rect) in cards.iter().skip(1) {
+            left = left.min(rect.x);
+            top = top.min(rect.y);
+            right = right.max(rect.x + rect.width);
+            bottom = bottom.max(rect.y + rect.height);
+        }
+
+        let reach = self.m.shadow as isize * 2;
+        self.region(
+            left as isize - reach,
+            top as isize - reach,
+            (right - left) + 2 * reach as usize,
+            (bottom - top) + 2 * reach as usize,
+        )
+    }
+
+    fn draw_notifications(&mut self) {
+        if self.notifications.is_empty() {
+            return;
+        }
+
+        let pad = 10 * self.m.scale;
+        let corner = self.m.corner;
+        let stripe = 4 * self.m.scale;
+        let body_colour = self.theme.text;
+        let card = self.theme.window_body;
+        let card_bottom = if self.m.soft {
+            logo::blend(card, 0x000000, 0.04)
+        } else {
+            card
+        };
+
+        for (index, rect) in self.notification_cards() {
+            let Some(item) = self.notifications.get(index).cloned() else {
+                continue;
+            };
+
+            let (x, y) = (rect.x as isize, rect.y as isize);
+            if self.m.shadow > 0 {
+                self.draw_shadow(x, y, rect.width, rect.height, self.m.shadow);
+            }
+
+            self.fill_surface(
+                x,
+                y,
+                rect.width,
+                rect.height,
+                card,
+                card_bottom,
+                (corner, corner),
+            );
+            // A coloured edge says what kind of news this is without needing a
+            // word for it, and without any theme having a say in the matter.
+            self.fill_surface(x, y, stripe, rect.height, item.kind.colour(), item.kind.colour(), (corner, corner));
+
+            let text_x = x + stripe as isize + pad as isize;
+            let columns = ((rect.width - 2 * pad) / self.m.cell_w.max(1)).max(8);
+            let interior = rect.width.saturating_sub(stripe + 2 * pad);
+
+            // Who is speaking, in their colour; then what they said.
+            self.draw_text_within(text_x, y + pad as isize, &item.source, item.kind.colour(), interior);
+
+            let mut row = 1;
+            for line in wrap(&item.body, columns) {
+                self.draw_text_within(
+                    text_x,
+                    y + pad as isize + (row * self.m.cell_h) as isize,
+                    line,
+                    body_colour,
+                    interior,
+                );
+                row += 1;
+            }
+        }
+    }
+
+    /// Which launcher entry `(x, y)` falls on, if any.
+    ///
+    /// The one description of where the rows are: the highlight and the click
+    /// both come through here, so the row that lights up is always the row
+    /// that opens.
+    fn entry_at(&self, x: isize, y: isize) -> Option<usize> {
+        if !self.launcher_open {
+            return None;
+        }
+        let launcher_y = self.launcher_y();
+        if x < self.m.launcher_x || x >= self.m.launcher_x + self.launcher_width() as isize {
+            return None;
+        }
+        if y < launcher_y + self.m.launcher_header {
+            return None;
+        }
+
+        let offset = y - launcher_y - self.m.launcher_header;
+        // Rows are shorter than their spacing; a point in the gap between them
+        // is on neither.
+        if offset % self.m.launcher_row_step >= self.m.launcher_row_height as isize {
+            return None;
+        }
+        let row = (offset / self.m.launcher_row_step) as usize;
+        (row < self.launcher_items.len()).then_some(row)
+    }
+
+    fn launcher_region(&self) -> Option<Damage> {
+        // Widened by the shadow: the menu paints outside its own rectangle
+        // now, and a region that stopped at the edge would leave the shadow
+        // behind when the menu closed.
+        let reach = self.m.shadow as isize * 2;
+        self.region(
+            self.m.launcher_x - reach,
+            self.launcher_y() - reach,
+            self.launcher_width() + 2 * reach as usize,
+            self.launcher_height() + 2 * reach as usize,
         )
     }
 
@@ -702,6 +1589,19 @@ impl Desktop {
             self.invalidate_all();
         }
 
+        self.service_notifications();
+
+        // A minute passing is damage like any other. Checked before the damage
+        // is taken, so a desktop with nothing else happening still ticks.
+        if self.theme.show_clock {
+            let showing = crate::clock::now().map(|now| (now.hour, now.minute));
+            if showing != self.clock_shown {
+                self.clock_shown = showing;
+                let (panel_y, height) = (self.panel_y(), self.m.panel_height);
+                self.invalidate_rect(0, panel_y, self.width, height);
+            }
+        }
+
         let Some(damage) = self.damage.take() else {
             return;
         };
@@ -713,13 +1613,11 @@ impl Desktop {
         // like a real workspace.  They are also mouse targets for the two
         // built-in applications.
         if self.theme.show_shortcuts {
-            self.draw_shortcut(SHORTCUT_X as usize, SHORTCUT_TOP as usize, "Terminal", "Shell");
-            self.draw_shortcut(
-                SHORTCUT_X as usize,
-                SHORTCUT_SECOND_TOP as usize,
-                "System",
-                "Monitor",
-            );
+            let x = self.m.shortcut_x.max(0) as usize;
+            let top = self.m.shortcut_top;
+            let step = self.m.shortcut_step;
+            self.draw_shortcut(x, top.max(0) as usize, "Terminal", "Shell");
+            self.draw_shortcut(x, (top + step).max(0) as usize, "System", "Monitor");
         }
 
         // Back to front, so the focused window ends up on top.
@@ -737,6 +1635,10 @@ impl Desktop {
         if self.launcher_open {
             self.draw_launcher();
         }
+        // Above the windows and the panel, below the cursor: a notification is
+        // the system speaking over whatever else is on screen.
+        self.draw_notifications();
+        self.draw_menu();
         self.draw_cursor();
         self.present(damage);
         self.clip = None;
@@ -834,19 +1736,58 @@ impl Desktop {
         let label = self.theme.desktop_text;
         let label_width = self.m.shortcut_label_width;
 
-        self.fill(x as isize, y as isize, SHORTCUT_ICON, SHORTCUT_ICON, light);
-        self.fill(
-            x as isize + 3,
-            y as isize + 3,
-            SHORTCUT_ICON - 6,
-            SHORTCUT_ICON - 6,
-            accent,
-        );
-        self.draw_logo(x + 10, y + 8, 28);
+        let icon = self.m.shortcut_icon;
+        let scale = self.m.scale;
+        let corner = if self.m.soft { icon / 5 } else { 0 };
+        let rim = 2 * scale;
 
-        let label_x = x as isize + SHORTCUT_LABEL_X;
-        self.draw_text_within(label_x, y as isize + 5, name, label, label_width);
-        self.draw_text_within(label_x, y as isize + 27, detail, label, label_width);
+        if self.m.shadow > 0 {
+            self.draw_shadow(x as isize, y as isize, icon, icon, self.m.shadow / 2);
+        }
+
+        // A pale rim around a coloured tile, so the icon reads against both a
+        // dark wallpaper and a light one without either being chosen for it.
+        self.fill_surface(
+            x as isize,
+            y as isize,
+            icon,
+            icon,
+            light,
+            light,
+            (corner, corner),
+        );
+        let (top, bottom) = if self.m.soft {
+            (
+                logo::blend(accent, 0xFFFFFF, 0.12),
+                logo::blend(accent, 0x000000, 0.12),
+            )
+        } else {
+            (accent, accent)
+        };
+        self.fill_surface(
+            x as isize + rim as isize,
+            y as isize + rim as isize,
+            icon - 2 * rim,
+            icon - 2 * rim,
+            top,
+            bottom,
+            (corner.saturating_sub(rim), corner.saturating_sub(rim)),
+        );
+        self.draw_logo(x + icon / 6, y + icon / 8, icon - icon / 3);
+
+        // The two labels straddle the icon's middle, so the pair reads as one
+        // block against the icon however tall the text is.
+        let label_x = x as isize + self.m.shortcut_label_x;
+        let cell_h = self.m.cell_h as isize;
+        let first = y as isize + (icon as isize - 2 * cell_h) / 2;
+        self.draw_text_within(label_x, first, name, label, label_width);
+        self.draw_text_within(
+            label_x,
+            first + cell_h,
+            detail,
+            logo::blend(label, self.theme.desktop_top, 0.35),
+            label_width,
+        );
     }
 
     /// Whether `(x, y)` is inside the shortcut whose icon starts at `top`.
@@ -855,10 +1796,12 @@ impl Desktop {
     /// target covers the text too — measured from where the text is actually
     /// drawn rather than guessed, which is how it came to stop short of it.
     fn in_shortcut(&self, x: isize, y: isize, top: isize) -> bool {
-        x >= SHORTCUT_X
-            && x < SHORTCUT_X + SHORTCUT_LABEL_X + self.m.shortcut_label_width as isize
+        x >= self.m.shortcut_x
+            && x < self.m.shortcut_x
+                + self.m.shortcut_label_x
+                + self.m.shortcut_label_width as isize
             && y >= top
-            && y < top + SHORTCUT_ICON as isize
+            && y < top + self.m.shortcut_icon as isize
     }
 
     fn draw_panel(&mut self) {
@@ -868,28 +1811,57 @@ impl Desktop {
         let height = self.m.panel_height;
         // Text sits one line in from the top of the bar, centred by eye.
         let text_y = y + (height as isize - self.m.cell_h as isize) / 2;
-        let box_height = height.saturating_sub(8);
+        let inset = self.m.gap;
+        let box_height = height.saturating_sub(2 * inset as usize);
+        let box_y = y + inset;
+        let corner = if self.m.soft { self.m.corner } else { 0 };
+        let soft = self.m.soft;
 
-        self.fill(0, y, self.width, height, panel);
-        // The rule goes along whichever edge faces the rest of the screen.
-        let rule_y = if self.m.panel_at_top { y + height as isize - 1 } else { y };
-        self.fill(0, rule_y, self.width, 1, edge);
+        let (top_shade, bottom_shade) = if soft {
+            (
+                logo::blend(panel, 0xFFFFFF, 0.05),
+                logo::blend(panel, 0x000000, 0.12),
+            )
+        } else {
+            (panel, panel)
+        };
+        self.fill_surface(0, y, self.width, height, top_shade, bottom_shade, (0, 0));
+
+        // The rule goes along whichever edge faces the rest of the screen, and
+        // is a scaled pixel thick so it does not vanish on a dense display.
+        let thickness = self.m.scale;
+        let rule_y = if self.m.panel_at_top {
+            y + height as isize - thickness as isize
+        } else {
+            y
+        };
+        self.fill(0, rule_y, self.width, thickness, edge);
 
         // Launcher button, task strip, and a small status area.  A clock needs
         // a time service; until that exists this says whatever the user wants.
-        self.fill(
-            LAUNCHER_BUTTON_X,
-            y + 4,
+        let (accent_top, accent_bottom) = if soft {
+            (
+                logo::blend(accent, 0xFFFFFF, 0.12),
+                logo::blend(accent, 0x000000, 0.12),
+            )
+        } else {
+            (accent, accent)
+        };
+        self.fill_surface(
+            self.m.launcher_x,
+            box_y,
             self.m.launcher_button_width,
             box_height,
-            accent,
+            accent_top,
+            accent_bottom,
+            (corner, corner),
         );
         self.draw_text_within(
-            LAUNCHER_BUTTON_X + 8,
+            self.m.launcher_x + 8 * thickness as isize,
             text_y,
             "Kestrel",
             light,
-            self.m.launcher_button_width - 12,
+            self.m.launcher_button_width - 12 * thickness,
         );
 
         let mut x = self.m.task_strip_x;
@@ -900,65 +1872,225 @@ impl Desktop {
             } else {
                 self.theme.launcher
             };
-            self.fill(x, y + 4, self.m.task_width, box_height, colour);
+            let (button_top, button_bottom) = if soft {
+                (
+                    logo::blend(colour, 0xFFFFFF, 0.10),
+                    logo::blend(colour, 0x000000, 0.10),
+                )
+            } else {
+                (colour, colour)
+            };
+            self.fill_surface(
+                x,
+                box_y,
+                self.m.task_width,
+                box_height,
+                button_top,
+                button_bottom,
+                (corner, corner),
+            );
             // The panel is intentionally compact.  A window's first word is
             // readable here while its full title remains in the title bar.
             let label = title.split_whitespace().next().unwrap_or(title);
-            self.draw_text_within(x + 7, text_y, label, light, self.m.task_width - 14);
+            let ink = if index == self.focused {
+                light
+            } else {
+                logo::blend(light, colour, 0.25)
+            };
+            self.draw_text_within(
+                x + 7 * thickness as isize,
+                text_y,
+                label,
+                ink,
+                self.m.task_width - 14 * thickness,
+            );
             x += self.m.task_step;
         }
 
-        // Right-aligned from its actual width, so it cannot run off the edge.
-        if self.theme.show_status {
-            let status = self.theme.status_text.clone();
-            let status_width = status.chars().count() * self.m.cell_w;
-            if self.width > status_width + 24 {
-                let status_x = (self.width - status_width - 12) as isize;
-                // Never let it collide with the last task button.
-                if status_x > x + 8 {
-                    self.draw_text(status_x, text_y, &status, light);
-                }
+        // ---- the status area, at the far end of the panel ----------------
+        //
+        // Right-aligned from its own measured width, so it cannot run off the
+        // edge, and never allowed to collide with the last task button.
+        let mut fields: Vec<String> = Vec::new();
+
+        if self.theme.show_clock {
+            fields.push(match crate::net::config(|config| config.ip) {
+                Some(ip) => alloc::format!("{ip}"),
+                None => String::from("offline"),
+            });
+
+            let used = crate::memory::allocated_frames();
+            let total = (crate::memory::usable_bytes() / 4096).max(1);
+            fields.push(alloc::format!("mem {}%", used * 100 / total));
+
+            if let Some(now) = crate::clock::now() {
+                fields.push(alloc::format!("{:02}:{:02}", now.hour, now.minute));
+            }
+        }
+
+        if self.theme.show_status && !self.theme.status_text.is_empty() {
+            fields.insert(0, self.theme.status_text.clone());
+        }
+
+        if fields.is_empty() {
+            return;
+        }
+
+        // Three characters of separator between fields: " | ".
+        let characters: usize =
+            fields.iter().map(|field| field.chars().count()).sum::<usize>() + 3 * (fields.len() - 1);
+        let text_width = characters * self.m.cell_w;
+        let pad = 10 * thickness;
+
+        if self.width < text_width + pad * 4 {
+            return;
+        }
+
+        let start = (self.width - text_width - pad * 2) as isize;
+        if start <= x + self.m.gap {
+            return;
+        }
+
+        // One tray, rather than loose text floating at the end of the bar.
+        let tray = self.theme.launcher;
+        let (tray_top, tray_bottom) = if soft {
+            (
+                logo::blend(tray, 0xFFFFFF, 0.08),
+                logo::blend(tray, 0x000000, 0.08),
+            )
+        } else {
+            (tray, tray)
+        };
+        self.fill_surface(
+            start,
+            box_y,
+            text_width + pad * 2,
+            box_height,
+            tray_top,
+            tray_bottom,
+            (corner, corner),
+        );
+
+        // Drawn field by field so the separators can be quieter than the
+        // values and the clock brighter than either.
+        let quiet = logo::blend(light, tray, 0.30);
+        let faint = logo::blend(light, tray, 0.62);
+        let last = fields.len() - 1;
+        let mut cursor = start + pad as isize;
+
+        for (index, field) in fields.iter().enumerate() {
+            let ink = if index == last && self.theme.show_clock { light } else { quiet };
+            self.draw_text(cursor, text_y, field, ink);
+            cursor += (field.chars().count() * self.m.cell_w) as isize;
+
+            if index != last {
+                self.draw_text(cursor, text_y, " | ", faint);
+                cursor += (3 * self.m.cell_w) as isize;
             }
         }
     }
 
     fn draw_launcher(&mut self) {
         let y = self.launcher_y();
-        let (width, height) = (self.m.launcher_width, self.m.launcher_height);
+        let (width, height) = (self.launcher_width(), self.launcher_height());
         let light = self.theme.light_text;
+        let x = self.m.launcher_x;
+        let scale = self.m.scale;
+        let corner = self.m.corner;
+        let soft = self.m.soft;
+        let base = self.theme.launcher;
 
-        self.fill(LAUNCHER_X, y, width, height, self.theme.launcher);
-        self.fill(LAUNCHER_X, y, width, 1, self.theme.panel_edge);
-        // Closing the launcher only invalidates the launcher's own rectangle,
-        // so nothing here may be drawn beyond it either.
-        self.draw_text_within(LAUNCHER_X + 12, y + 10, "Applications", light, width - 24);
+        // Closing the launcher only invalidates the launcher's own rectangle
+        // (plus its shadow), so nothing here may be drawn beyond that.
+        if self.m.shadow > 0 {
+            self.draw_shadow(x, y, width, height, self.m.shadow);
+        }
+        let bottom = if soft { logo::blend(base, 0x000000, 0.10) } else { base };
+        self.fill_surface(x, y, width, height, base, bottom, (corner, corner));
+        self.fill(x, y, width, scale, self.theme.panel_edge);
 
-        // Driven by `Kind::ALL`, so the rows and the click handling cannot
-        // disagree about which entry is which.
-        let entries: Vec<(&str, &str)> = Kind::ALL
+        // The search field, which doubles as the heading: it says what this
+        // menu is for, and shows what has been typed at it.
+        let query = self.search.clone();
+        let prompt = if query.is_empty() {
+            String::from("Search applications")
+        } else {
+            alloc::format!("{query}_")
+        };
+        let quiet = logo::blend(light, base, 0.45);
+        self.draw_text_within(
+            x + 12 * scale as isize,
+            y + 10 * scale as isize,
+            &prompt,
+            if query.is_empty() { quiet } else { light },
+            width - 24 * scale,
+        );
+
+        // Walks the list the hit testing walks, so the row that lights up is
+        // the row that opens.
+        let entries: Vec<(String, String)> = self
+            .launcher_items
             .iter()
-            .map(|kind| (kind.title(), kind.description()))
+            .map(|entry| (entry.name.clone(), entry.detail.clone()))
             .collect();
-        let row_x = LAUNCHER_X + 6;
-        let row_width = width - 12;
-        let text_width = row_width - 20;
+        let row_x = x + self.m.gap;
+        let row_width = width - 2 * self.m.gap as usize;
+        let text_width = row_width - 20 * scale;
+
+        if entries.is_empty() {
+            self.draw_text_within(
+                row_x + 10 * scale as isize,
+                y + self.m.launcher_header,
+                "Nothing matches",
+                quiet,
+                text_width,
+            );
+            return;
+        }
 
         for (index, (name, description)) in entries.iter().enumerate() {
             let row_y = y + self.m.launcher_header + index as isize * self.m.launcher_row_step;
-            self.fill(
-                row_x,
-                row_y,
-                row_width,
-                self.m.launcher_row_height,
-                self.theme.launcher_selected,
-            );
+
+            // Only the row under the pointer is highlighted. Painting every
+            // row in the selection colour, which is what this used to do, made
+            // a menu of four identical buttons and hid which one was about to
+            // be chosen.
+            // The pointer wins while it is over a row; otherwise the
+            // keyboard's own selection is what is highlighted, so typing and
+            // pressing Enter is a complete way to use this.
+            let hovered = match self.hovered_entry {
+                Some(row) => row == index,
+                None => self.selected == index,
+            };
+            let selected = self.theme.launcher_selected;
+            if hovered {
+                let (top, bottom) = if soft {
+                    (
+                        logo::blend(selected, 0xFFFFFF, 0.10),
+                        logo::blend(selected, 0x000000, 0.10),
+                    )
+                } else {
+                    (selected, selected)
+                };
+                self.fill_surface(
+                    row_x,
+                    row_y,
+                    row_width,
+                    self.m.launcher_row_height,
+                    top,
+                    bottom,
+                    (corner, corner),
+                );
+            }
+
+            let backdrop = if hovered { selected } else { base };
             // One cell apart, so the description clears the name.
-            self.draw_text_within(row_x + 10, row_y + 4, name, light, text_width);
+            self.draw_text_within(row_x + 10 * scale as isize, row_y + 4 * scale as isize, name, light, text_width);
             self.draw_text_within(
-                row_x + 10,
-                row_y + 4 + self.m.cell_h as isize,
+                row_x + 10 * scale as isize,
+                row_y + 4 * scale as isize + self.m.cell_h as isize,
                 description,
-                light,
+                logo::blend(light, backdrop, 0.40),
                 text_width,
             );
         }
@@ -979,15 +2111,34 @@ impl Desktop {
         let title_height = self.m.title_height;
         let border = self.m.border;
         let inset = border as isize;
+        let corner = self.m.corner;
+        let inner_corner = corner.saturating_sub(border);
+        let soft = self.m.soft;
 
-        // Border, then body inset by the border width.
-        self.fill(x, y, width, height, self.theme.window_border);
-        self.fill(
+        // The shadow goes down first, so the window sits on top of its own.
+        // Only the focused window casts a full one; the others are further
+        // back and say so by casting less.
+        if self.m.shadow > 0 {
+            let extent = if focused { self.m.shadow } else { self.m.shadow / 2 };
+            self.draw_shadow(x, y, width, height, extent);
+        }
+
+        // Frame, then body inset by the border width.
+        let frame = self.theme.window_border;
+        self.fill_surface(x, y, width, height, frame, frame, (corner, corner));
+
+        let body = self.theme.window_body;
+        // A body that is very slightly darker at the bottom reads as a surface
+        // rather than a hole. Two percent: any more and it looks dirty.
+        let body_bottom = if soft { logo::blend(body, 0x000000, 0.02) } else { body };
+        self.fill_surface(
             x + inset,
             y + title_height as isize,
             width.saturating_sub(border * 2),
             height.saturating_sub(title_height + border),
-            self.theme.window_body,
+            body,
+            body_bottom,
+            (0, inner_corner),
         );
 
         let title_colour = if focused {
@@ -995,12 +2146,24 @@ impl Desktop {
         } else {
             self.theme.title_inactive
         };
-        self.fill(
+        // Lit from above, like everything else: lighter at the top edge,
+        // deeper at the join with the body.
+        let (title_top, title_bottom) = if soft {
+            (
+                logo::blend(title_colour, 0xFFFFFF, 0.10),
+                logo::blend(title_colour, 0x000000, 0.10),
+            )
+        } else {
+            (title_colour, title_colour)
+        };
+        self.fill_surface(
             x + inset,
             y + inset,
             width.saturating_sub(border * 2),
             title_height.saturating_sub(border),
-            title_colour,
+            title_top,
+            title_bottom,
+            (inner_corner, 0),
         );
 
         // Centred in the title bar, so it stays put as the bar is resized.
@@ -1009,17 +2172,39 @@ impl Desktop {
         let (close_x, close_y, close_size) = self.windows[index].close_button();
 
         // The title stops before the close button rather than running under it.
-        let title_room = (close_x - (x + 8)).max(0) as usize;
-        self.draw_text_within(x + 8, title_y, &title, self.theme.light_text, title_room);
+        let pad = 6 * self.m.scale as isize;
+        let title_room = (close_x - (x + pad)).max(0) as usize;
+        self.draw_text_within(x + pad, title_y, &title, self.theme.light_text, title_room);
 
         // A cross, drawn as two diagonals rather than a glyph so it stays
-        // square and centred at any title-bar height.
+        // square and centred at any title-bar height. The strokes thicken with
+        // the scale, or the button would be a hairline on a 4K panel.
         let mark = self.theme.light_text;
-        self.fill(close_x, close_y, close_size, close_size, self.theme.window_border);
-        for step in 2..close_size.saturating_sub(2) {
+        let button = if soft {
+            logo::blend(title_colour, 0x000000, 0.22)
+        } else {
+            self.theme.window_border
+        };
+        let button_corner = if soft { close_size / 3 } else { 0 };
+        self.fill_surface(
+            close_x,
+            close_y,
+            close_size,
+            close_size,
+            button,
+            button,
+            (button_corner, button_corner),
+        );
+
+        let thickness = self.m.scale.max(1);
+        let margin = close_size / 4;
+        for step in margin..close_size.saturating_sub(margin) {
             let far = close_size - 1 - step;
-            self.plot((close_x + step as isize) as usize, (close_y + step as isize) as usize, mark);
-            self.plot((close_x + step as isize) as usize, (close_y + far as isize) as usize, mark);
+            for offset in 0..thickness {
+                let nudge = offset as isize;
+                self.blend(close_x + step as isize, close_y + step as isize + nudge, mark, 255);
+                self.blend(close_x + step as isize, close_y + far as isize + nudge, mark, 255);
+            }
         }
 
         // A program's window shows whatever it last drew.
@@ -1042,7 +2227,7 @@ impl Desktop {
         // invalidates the rectangle it left and the one it moved to, so pixels
         // beyond that are never erased and smear across the desktop.
         let colour = if focused { self.theme.text } else { self.theme.text_dim };
-        let interior = width.saturating_sub(16);
+        let interior = width.saturating_sub(2 * pad as usize);
         let columns = interior / self.m.cell_w.max(1);
         let cell_h = self.m.cell_h;
         let lines = self.windows[index].lines.clone();
@@ -1050,11 +2235,11 @@ impl Desktop {
         let mut row = 0;
         'lines: for line in lines.iter() {
             for piece in wrap(line, columns) {
-                let py = y + (title_height + 4 + row * cell_h) as isize;
+                let py = y + (title_height + 4 * self.m.scale + row * cell_h) as isize;
                 if py + cell_h as isize > y + height as isize {
                     break 'lines;
                 }
-                self.draw_text_within(x + 8, py, piece, colour, interior);
+                self.draw_text_within(x + pad, py, piece, colour, interior);
                 row += 1;
             }
         }
@@ -1078,12 +2263,19 @@ impl Desktop {
         // anyway, so this is the same cost the design already accepted.
         let pixels = self.windows[index].surface.clone();
 
+        // A program's surface reaches the bottom edge of its window, so it has
+        // to respect the same rounding the body was drawn with or it squares
+        // the two bottom corners off again.
+        let corner = self.m.corner.saturating_sub(self.m.border) as isize;
+
         for row in 0..height {
             let py = y + row as isize;
             if py < 0 {
                 continue;
             }
-            for column in 0..width {
+            let inset = Self::round_inset(corner, (height - 1 - row) as isize) as usize;
+
+            for column in inset..width.saturating_sub(inset) {
                 let px = x + column as isize;
                 if px < 0 {
                     continue;
@@ -1155,6 +2347,7 @@ impl Desktop {
         ];
 
         let (mx, my) = self.last_cursor;
+        let scale = self.m.scale as isize;
 
         for (row, line) in ARROW.iter().enumerate() {
             for (column, glyph) in line.bytes().enumerate() {
@@ -1163,10 +2356,17 @@ impl Desktop {
                     b'*' => self.theme.cursor,
                     _ => continue,
                 };
-                let x = mx + column as isize;
-                let y = my + row as isize;
-                if x >= 0 && y >= 0 {
-                    self.plot(x as usize, y as usize, colour);
+                // Magnified with the rest of the desktop: a 12-pixel arrow is
+                // a speck on the display that needed scale 3 in the first
+                // place.
+                for down in 0..scale {
+                    for across in 0..scale {
+                        let x = mx + column as isize * scale + across;
+                        let y = my + row as isize * scale + down;
+                        if x >= 0 && y >= 0 {
+                            self.plot(x as usize, y as usize, colour);
+                        }
+                    }
                 }
             }
         }
@@ -1210,14 +2410,60 @@ impl Desktop {
         let (x, y) = (x as isize, y as isize);
         let (left, _, _) = crate::mouse::buttons();
 
-        // The cursor itself is damage: erase its old 12x12 bitmap and draw it
-        // at the new location.  When it has not moved, an idle desktop costs
-        // no framebuffer work at all.
+        // The cursor itself is damage: erase its old arrow and draw it at the
+        // new location.  When it has not moved, an idle desktop costs no
+        // framebuffer work at all. The arrow is a 12x12 bitmap magnified by
+        // the text scale, so the region has to be scaled with it.
+        let arrow = CURSOR_SIZE * self.m.scale;
         if (x, y) != self.last_cursor {
             let (old_x, old_y) = self.last_cursor;
-            self.invalidate_rect(old_x, old_y, 12, 12);
-            self.invalidate_rect(x, y, 12, 12);
+            self.invalidate_rect(old_x, old_y, arrow, arrow);
+            self.invalidate_rect(x, y, arrow, arrow);
             self.last_cursor = (x, y);
+        }
+
+        // Which launcher row the pointer is over. Tracked on every move, not
+        // just on a click, because the highlight is what tells the user what
+        // the click will do.
+        let hovered = self.entry_at(x, y);
+        if hovered != self.hovered_entry {
+            self.hovered_entry = hovered;
+            self.invalidate(self.launcher_region());
+        }
+
+        // The same, for the context menu.
+        let over = self.menu_entry_at(x, y);
+        if over != self.menu_hover {
+            self.menu_hover = over;
+            let region = self.menu_region();
+            self.invalidate(region);
+        }
+
+        // The right button opens a menu, on its own press edge. Handled before
+        // the left button's early return, or a menu could only be opened
+        // while something else was already held down.
+        let (_, right, _) = crate::mouse::buttons();
+        if right {
+            if !self.right_was_down {
+                self.right_was_down = true;
+
+                let panel_y = self.panel_y();
+                let on_panel = y >= panel_y && y < panel_y + self.m.panel_height as isize;
+                let on_window = self.windows.iter().any(|window| {
+                    x >= window.x
+                        && x < window.x + window.width as isize
+                        && y >= window.y
+                        && y < window.y + window.height as isize
+                });
+
+                if on_panel {
+                    self.open_menu(x, y - self.menu_size(&crate::menu::panel()).1 as isize, crate::menu::panel());
+                } else if !on_window && !self.launcher_open {
+                    self.open_menu(x, y, crate::menu::desktop());
+                }
+            }
+        } else {
+            self.right_was_down = false;
         }
 
         if !left {
@@ -1234,8 +2480,8 @@ impl Desktop {
                     let (width, height) = (window.width, window.height);
                     window.x = new_x;
                     window.y = new_y;
-                    self.invalidate_rect(old_x, old_y, width, height);
-                    self.invalidate_rect(new_x, new_y, width, height);
+                    self.invalidate_window_rect(old_x, old_y, width, height);
+                    self.invalidate_window_rect(new_x, new_y, width, height);
                 }
             }
             return;
@@ -1249,14 +2495,57 @@ impl Desktop {
         }
         self.left_was_down = true;
 
+        // An open menu takes the next click, wherever it lands: choosing an
+        // entry, or dismissing the menu without also acting on whatever was
+        // underneath it.
+        if self.menu.is_some() {
+            let chosen = self
+                .menu_entry_at(x, y)
+                .and_then(|index| self.menu.as_ref()?.2.get(index)?.action);
+            let inside = self.in_menu(x, y);
+            self.close_menu();
+
+            if let Some(action) = chosen {
+                self.run_menu_action(action);
+            }
+            if inside || chosen.is_some() {
+                return;
+            }
+            return;
+        }
+
+        // A notification is dismissed by clicking it, and takes the click with
+        // it: the window underneath was covered when the user aimed.
+        if !self.notifications.is_empty() {
+            let hit = self
+                .notification_cards()
+                .into_iter()
+                .find(|(_, rect)| {
+                    x >= rect.x as isize
+                        && x < (rect.x + rect.width) as isize
+                        && y >= rect.y as isize
+                        && y < (rect.y + rect.height) as isize
+                })
+                .map(|(index, _)| index);
+
+            if let Some(index) = hit {
+                let previous = self.notification_bounds();
+                self.notifications.remove(index);
+                let current = self.notification_bounds();
+                self.invalidate(previous);
+                self.invalidate(current);
+                self.notification_rect = current;
+                return;
+            }
+        }
+
         let panel_y = self.panel_y();
         let in_panel = y >= panel_y && y < panel_y + self.m.panel_height as isize;
         if in_panel {
-            if x >= LAUNCHER_BUTTON_X
-                && x < LAUNCHER_BUTTON_X + self.m.launcher_button_width as isize
+            if x >= self.m.launcher_x
+                && x < self.m.launcher_x + self.m.launcher_button_width as isize
             {
-                self.launcher_open = !self.launcher_open;
-                self.invalidate(self.launcher_region());
+                self.toggle_launcher();
                 return;
             }
 
@@ -1278,33 +2567,22 @@ impl Desktop {
 
         if self.launcher_open {
             let launcher_y = self.launcher_y();
-            let inside_x = x >= LAUNCHER_X && x < LAUNCHER_X + self.m.launcher_width as isize;
+            let inside_x =
+                x >= self.m.launcher_x && x < self.m.launcher_x + self.launcher_width() as isize;
 
             if inside_x && y >= launcher_y + self.m.launcher_header {
-                let offset = y - launcher_y - self.m.launcher_header;
-                let row = (offset / self.m.launcher_row_step) as usize;
-                // Rows are shorter than their spacing; a click in the gap
-                // between them selects neither.
-                let within =
-                    offset % self.m.launcher_row_step < self.m.launcher_row_height as isize;
-
-                if within {
-                    if let Some(&kind) = Kind::ALL.get(row) {
-                        // Focus it if it is open, otherwise ask for it to be
-                        // opened — which is what makes closing a window
-                        // recoverable rather than permanent.
-                        match self.find(kind) {
-                            Some(index) => self.focused = index,
-                            None => self.open_request = Some(kind),
-                        }
+                match self.entry_at(x, y) {
+                    Some(row) => self.activate_entry(row),
+                    None => {
+                        // Inside the menu but between rows: not a choice, but
+                        // not a dismissal either.
+                        self.close_launcher();
+                        self.invalidate_all();
                     }
                 }
-                self.launcher_open = false;
-                self.invalidate_all();
                 return;
             }
-            self.launcher_open = false;
-            self.invalidate(self.launcher_region());
+            self.close_launcher();
         }
 
         // The desktop shortcuts mirror the launcher entries, and behave the
@@ -1312,7 +2590,8 @@ impl Desktop {
         // by index — a closed window shifts every index after it, so "shortcut
         // two means window one" stops being true the moment anything closes.
         if self.theme.show_shortcuts {
-            for (row, top) in [SHORTCUT_TOP, SHORTCUT_SECOND_TOP].iter().enumerate() {
+            let tops = [self.m.shortcut_top, self.m.shortcut_top + self.m.shortcut_step];
+            for (row, top) in tops.iter().enumerate() {
                 if !self.in_shortcut(x, y, *top) {
                     continue;
                 }
@@ -1466,6 +2745,11 @@ pub static DESKTOP: Mutex<Option<Desktop>> = Mutex::new(None);
 pub static SCREEN_DISTURBED: AtomicBool = AtomicBool::new(false);
 
 /// Called from the console when it writes to the framebuffer.
+/// Offer a keystroke to the desktop. See `Desktop::take_key`.
+pub fn take_key(byte: u8) -> bool {
+    with(|desktop| desktop.take_key(byte)).unwrap_or(false)
+}
+
 pub fn note_screen_disturbed() {
     SCREEN_DISTURBED.store(true, Ordering::Relaxed);
 }

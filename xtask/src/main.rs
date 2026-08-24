@@ -6,9 +6,11 @@
 mod crc;
 mod fat;
 mod icon;
+mod lint;
 mod image;
 mod iso;
 mod png;
+mod test;
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -119,6 +121,18 @@ fn main() {
                 }
             }
         }
+        // Source checks first: they need no guest, and a failure here is
+        // cheaper to learn about before a twenty-second boot than after it.
+        "lint" => {
+            std::process::exit(if lint::run(&workspace_root()) == 0 { 0 } else { 1 });
+        }
+        "test" => {
+            let source_failures = lint::run(&workspace_root());
+            build_kernel(&opts);
+            build_user_programs(&opts);
+            assemble_esp(&opts);
+            run_tests(&opts, args.iter().any(|a| a == "--skip-net"), source_failures);
+        }
         "iso" => {
             build_kernel(&opts);
             build_user_programs(&opts);
@@ -127,9 +141,11 @@ fn main() {
         }
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: cargo xtask [build|run|image] [--release] [--headless] [--image]");
+            eprintln!("usage: cargo xtask [build|run|image|iso|test|lint|icon]");
+            eprintln!("                   [--release] [--headless] [--image] [--vhd] [--iso]");
             eprintln!("                   [--screenshot <file.png>] [--keys <text>]");
-            eprintln!("                   [--timeout <secs>]");
+            eprintln!("                   [--serial-keys <text>] [--cpus N] [--pcap <file>]");
+            eprintln!("                   [--timeout <secs>] [--skip-net]");
             std::process::exit(2);
         }
     }
@@ -374,7 +390,11 @@ fn qemu_dir() -> PathBuf {
     PathBuf::new()
 }
 
-fn run_qemu(opts: &Options, iso: Option<&Path>) {
+/// Build the QEMU invocation every run shares: machine, disks, firmware and
+/// networking. How the guest is displayed and driven is left to the caller,
+/// because that is the only part that differs between an interactive run, a
+/// screenshot and the test suite.
+fn qemu_command(opts: &Options, iso: Option<&Path>) -> Command {
     let root = workspace_root();
     let esp = root.join("build/esp");
     let dir = qemu_dir();
@@ -391,6 +411,15 @@ fn run_qemu(opts: &Options, iso: Option<&Path>) {
     cmd.current_dir(&root)
         .args(["-M", "q35"])
         .args(["-m", "512M"])
+        // Without an EDID the firmware offers its own idea of a sensible mode
+        // list, which tops out well below what `limine.conf` asks for. This
+        // advertises a 1080p display, so the guest can actually be given the
+        // mode it requests. The extra video memory is what makes that mode
+        // available at 32 bits per pixel.
+        .args([
+            "-device",
+            "VGA,edid=on,xres=1920,yres=1080,vgamem_mb=32",
+        ])
         .args(["-cpu", "qemu64"])
         .args(["-smp", &opts.cpus.to_string()])
         // User-mode networking: the guest gets 10.0.2.15, the gateway is
@@ -428,6 +457,41 @@ fn run_qemu(opts: &Options, iso: Option<&Path>) {
             pcap.display()
         ));
     }
+
+    cmd
+}
+
+/// Boot a guest and run the smoke suite against it.
+///
+/// Exits the process: the suite's result is the command's result, so this is
+/// usable as a commit gate.
+fn run_tests(opts: &Options, skip_network: bool, source_failures: usize) -> ! {
+    let mut cmd = qemu_command(opts, None);
+
+    // Same wiring as `--serial-keys`: no window, and a socket the suite can
+    // both type into and read from.
+    cmd.args(["-display", "none"]);
+    cmd.arg("-serial")
+        .arg(format!("tcp:127.0.0.1:{SERIAL_PORT},server,nowait"));
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("failed to start qemu");
+
+    let failed = test::run(skip_network) + source_failures;
+
+    // The kernel never exits, so the guest is always killed rather than
+    // waited on.
+    child.kill().ok();
+    child.wait().ok();
+
+    std::process::exit(if failed == 0 { 0 } else { 1 });
+}
+
+fn run_qemu(opts: &Options, iso: Option<&Path>) {
+    let root = workspace_root();
+    let mut cmd = qemu_command(opts, iso);
 
     let capturing = opts.screenshot.is_some();
     let needs_monitor = capturing || opts.keys.is_some();
@@ -534,8 +598,15 @@ fn send_keys(text: &str) -> std::io::Result<usize> {
                 sent += 1;
                 continue;
             }
-            if name == "click" || name == "release" {
-                let buttons = if name == "click" { 1 } else { 0 };
+            // A bitmask, not a button number: 1 is left, 2 is right. `click`
+            // and `rclick` press without releasing, which is what makes a
+            // drag expressible; `release` lets go of everything.
+            if matches!(name, "click" | "release" | "rclick") {
+                let buttons = match name {
+                    "click" => 1,
+                    "rclick" => 2,
+                    _ => 0,
+                };
                 writeln!(stream, "mouse_button {buttons}")?;
                 stream.flush()?;
                 std::thread::sleep(Duration::from_millis(60));
@@ -556,7 +627,7 @@ fn send_keys(text: &str) -> std::io::Result<usize> {
                         std::io::ErrorKind::InvalidInput,
                         format!(
                             "unknown key name '{{{other}}}' in --keys; known: \
-                             up down left right home end del bs click release mouse:dx,dy"
+                             up down left right home end del bs click rclick release mouse:dx,dy"
                         ),
                     ))
                 }

@@ -131,8 +131,14 @@ pub fn install(name: &str) -> Result<usize, String> {
     let target = format!("{root}/{name}");
 
     match crate::vfs::write(&target, &image) {
-        Ok(()) => Ok(image.len()),
-        Err(e) => Err(format!("could not install {name}: {}", e.as_str())),
+        Ok(()) => {
+            crate::notify::success("Software", &format!("{name} installed"));
+            Ok(image.len())
+        }
+        Err(e) => {
+            crate::notify::error("Software", &format!("could not install {name}"));
+            Err(format!("could not install {name}: {}", e.as_str()))
+        }
     }
 }
 
@@ -142,7 +148,13 @@ pub fn remove(name: &str) -> Result<(), String> {
         return Err(format!("{name} is not installed"));
     }
 
-    crate::vfs::remove(&path).map_err(|e| format!("could not remove {name}: {}", e.as_str()))
+    match crate::vfs::remove(&path) {
+        Ok(()) => {
+            crate::notify::info("Software", &format!("{name} removed"));
+            Ok(())
+        }
+        Err(e) => Err(format!("could not remove {name}: {}", e.as_str())),
+    }
 }
 
 /// Find an installed program by bare name, so `exec snake` works.
