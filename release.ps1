@@ -36,7 +36,7 @@ try {
     }
 
     # Source checks, of which the ASCII one matters most here: the console
-    # draws from an 8x8 ASCII font and an em dash in a message shipped in
+    # draws from an 8x16 ASCII font and an em dash in a message shipped in
     # 0.9.1 as a row of question marks. The check lives in xtask so that
     # `cargo xtask lint`, `cargo xtask test` and this script all run the same
     # implementation rather than three that drift apart.

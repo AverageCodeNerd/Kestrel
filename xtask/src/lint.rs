@@ -2,7 +2,7 @@
 //!
 //! These exist because of a class of bug the smoke suite structurally cannot
 //! see. An em dash in the `version` banner shipped in 0.9.1 and rendered as a
-//! row of question marks, because the framebuffer console draws from an 8x8
+//! row of question marks, because the framebuffer console draws from an 8x16
 //! ASCII font and emits one `?` per byte it has no glyph for. The obvious
 //! regression test — run `version`, reject `??` — does not work: the suite
 //! drives the *serial* console, which passes UTF-8 through untouched. The
@@ -86,7 +86,7 @@ pub fn run(root: &Path) -> usize {
     }
 
     eprintln!("FAIL  non-ASCII in code the console can print");
-    eprintln!("  The framebuffer font is 8x8 ASCII; anything else renders as");
+    eprintln!("  The framebuffer font is 8x16 ASCII; anything else renders as");
     eprintln!("  one question mark per byte. Use a plain hyphen in messages.");
     for offence in &offences {
         eprintln!("  {}:{}: {}", offence.path.display(), offence.line, offence.text);

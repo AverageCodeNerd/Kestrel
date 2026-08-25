@@ -166,7 +166,7 @@ pub struct Theme {
     pub cursor_edge: u32,
 
     // ---- layout ----
-    /// Text magnification. The font is 8x8; everything that measures itself in
+    /// Text magnification. The font is 8x16; everything that measures itself in
     /// characters scales with this, which is why it is not merely cosmetic.
     pub scale: usize,
     pub panel_height: usize,
