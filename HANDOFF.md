@@ -20,6 +20,8 @@ links with the bundled `rust-lld`.
 
 ```bash
 cargo xtask run                      # build + boot in QEMU (4 cores, networking)
+cargo xtask test                     # boot a guest and run the smoke suite
+cargo xtask lint                     # source checks only, no guest needed
 cargo xtask image --release          # produce build/kestrel.{img,vhd,iso}
 cargo xtask icon                     # regenerate assets/kestrel-*.png
 .\release.ps1                        # stage a versioned release + SHA256SUMS
@@ -43,7 +45,8 @@ Useful flags: `--release`, `--cpus N`, `--image` (boot the real disk image),
 ```
 kernel/     the kernel (no_std, x86_64-unknown-none)
 xtask/      build driver: compiles, stages an ESP, makes images, drives QEMU
-user/       hello, fault, selfmod — userspace ELF programs
+user/       hello, fault, selfmod, edit, snake, paint, basic, and the
+            `kestrel` support crate — userspace ELF programs
 logo/       shared no_std crate describing the icon as code
 limine/     prebuilt Limine v11 binaries (shallow clone, carries its own .git)
 assets/     generated PNG icons
@@ -254,16 +257,25 @@ touching the relevant area.
 **Secure Boot must be off**, because Limine is not signed.
 
 - **QEMU** — `cargo xtask run`. Everything works, networking included.
-- **VirtualBox** — a VM named `Kestrel` is registered and verified booting:
-  EFI on, 4 CPUs, 2048 MB, 128 MB VRAM, SATA/AHCI, NIC set to Intel PRO/1000 MT
-  (82540EM), serial port 1 logging to `dist\serial.log`, booting
-  `dist\kestrel.vhd`. **Use the VHD, not the ISO** — on VirtualBox's virtual
-  DVD, Limine stops at "Could not meaningfully match the boot device handle
-  with a volume… Press any key" and never reaches the kernel. Networking does
-  not work here (see above).
+- **VirtualBox** — two VMs are registered and verified booting, both with EFI
+  on, 4 CPUs, 2048 MB, 128 MB VRAM, SATA/AHCI, NIC set to Intel PRO/1000 MT
+  (82540EM):
+
+  - `Kestrel` boots `dist\kestrel.vhd`, serial to `dist\serial.log`.
+  - `Kestrel-ISO` boots `dist\kestrel.iso` from the virtual DVD, serial to
+    `dist\serial-iso.log`. That is a different boot path — El Torito and the
+    hybrid GPT rather than a GPT disk — so both are worth keeping current.
+
+  **Both work now, and two claims here used to say otherwise.** The ISO once
+  stopped at "Could not meaningfully match the boot device handle with a
+  volume… Press any key"; the hybrid GPT that marks the El Torito image as an
+  EFI System Partition fixed that, and the image length must stay a multiple
+  of 2048 or VirtualBox rejects the file outright. Networking works too, since
+  `await_link`: a boot here reports `link: up after 920 ms` on the VHD and
+  about 1610 ms on the ISO — which is the whole reason the wait exists.
 
   After rebuilding, run `dist\refresh-vm.ps1` rather than copying by hand. It
-  detaches the disk before overwriting it — VirtualBox keeps the attached file
+  updates both VMs, and detaches each disk before overwriting it — VirtualBox keeps the attached file
   open, so a plain copy fails part-way and leaves a torn image — and it refuses
   to run while the VM is up. The VHD footer carries a **fixed UUID**, so
   VirtualBox will not register `build\` and `dist\` copies at the same time;

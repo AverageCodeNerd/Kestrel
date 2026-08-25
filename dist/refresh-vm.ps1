@@ -15,6 +15,10 @@ $ErrorActionPreference = "Stop"
 $vbox = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 $root = Split-Path -Parent $PSScriptRoot
 $vm = "Kestrel"
+# The second VM boots the ISO from a virtual DVD, which is a different boot
+# path: El Torito and the hybrid GPT rather than a GPT disk. Both are shipped,
+# so both are kept current.
+$isoVm = "Kestrel-ISO"
 
 if (-not (Test-Path $vbox)) { throw "VBoxManage not found at $vbox" }
 
@@ -22,6 +26,7 @@ if (-not (Test-Path $vbox)) { throw "VBoxManage not found at $vbox" }
 # a live guest corrupts it.
 $running = & $vbox list runningvms
 if ($running -match "`"$vm`"") { throw "$vm is running -- shut it down first" }
+if ($running -match "`"$isoVm`"") { throw "$isoVm is running -- shut it down first" }
 
 if (-not $NoBuild) {
     Push-Location $root
@@ -43,5 +48,16 @@ Copy-Item "$root\build\kestrel.iso" "$root\dist\kestrel.iso" -Force
 
 & $vbox storageattach $vm --storagectl SATA --port 0 --device 0 --type hdd --medium "$root\dist\kestrel.vhd"
 if ($LASTEXITCODE -ne 0) { throw "could not reattach the disk" }
+
+# Same dance for the DVD. VirtualBox registers an ISO by UUID as well, so the
+# old medium has to be closed or the fresh file is ignored in favour of the
+# registry's idea of what that UUID contains.
+if (& $vbox list vms | Select-String ([regex]::Escape("`"$isoVm`""))) {
+    & $vbox storageattach $isoVm --storagectl SATA --port 0 --device 0 --type dvddrive --medium none
+    & $vbox closemedium dvd "$root\dist\kestrel.iso" 2>$null
+    & $vbox storageattach $isoVm --storagectl SATA --port 0 --device 0 --type dvddrive --medium "$root\dist\kestrel.iso"
+    if ($LASTEXITCODE -ne 0) { throw "could not reattach the ISO" }
+    Write-Host "$isoVm now boots the current build. Serial log: dist\serial-iso.log"
+}
 
 Write-Host "$vm now boots the current build. Serial log: dist\serial.log"
