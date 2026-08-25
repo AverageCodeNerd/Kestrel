@@ -582,6 +582,18 @@ impl Shell {
                 desktop.open(build_window(kind, width, height));
             }
 
+            // A resized terminal shows a different number of rows, and the
+            // scrollback that fills them lives here rather than in the
+            // compositor. Without this the window keeps whatever it had until
+            // the next command prints something.
+            if desktop.take_terminal_resized() {
+                if let Some(index) = desktop.find(crate::desktop::Kind::Terminal) {
+                    let rows = desktop.windows[index].rows();
+                    desktop.windows[index].lines = terminal.visible(rows);
+                    desktop.invalidate_window(index);
+                }
+            }
+
             if let Some(bytes) = output {
                 terminal.write(&bytes);
                 // By role, not by index: closing a window shifts every index

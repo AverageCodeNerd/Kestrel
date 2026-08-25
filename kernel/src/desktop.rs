@@ -61,6 +61,8 @@ struct Metrics {
     border: usize,
     /// Corner rounding in real pixels, and zero for a flat theme.
     corner: usize,
+    /// How far inside a window's edge a press counts as grabbing it to resize.
+    grab: usize,
     /// Gradients and rounding, or solid fills and square edges.
     soft: bool,
     /// How far a window's shadow reaches, and zero when it casts none. Damage
@@ -132,6 +134,12 @@ impl Metrics {
             // to fade in, and the cost is paid only where a window overlaps
             // what is behind it.
             shadow: if theme.shadow && theme.soft() { 6 * scale } else { 0 },
+
+            // Wide enough to hit with a mouse that moves in whole pixels,
+            // narrow enough that the title bar is still mostly draggable.
+            // Scaled like everything else, or it would be a hair's breadth on
+            // a 4K panel and half the title bar on a small one.
+            grab: 4 * scale,
 
             task_width,
             task_step: task_width as isize + gap,
@@ -212,6 +220,39 @@ impl Kind {
     }
 }
 
+/// Which edges of a window a resize is pulling. A corner pulls two.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl Edges {
+    fn any(self) -> bool {
+        self.left || self.right || self.top || self.bottom
+    }
+}
+
+/// A resize in progress.
+///
+/// The rectangle and pointer position the drag *started* from are kept, and
+/// every frame recomputes the new rectangle from those. Accumulating a delta
+/// per frame instead would let the window creep: once a pull hits the minimum
+/// size the surplus movement has nowhere to go, and feeding the clamped result
+/// back in as the next frame's origin means dragging in and back out again
+/// does not return the window to where it was.
+#[derive(Clone, Copy)]
+struct Resize {
+    index: usize,
+    edges: Edges,
+    /// `(x, y, width, height)` when the drag began.
+    rect: (isize, isize, usize, usize),
+    /// Where the pointer was when the drag began.
+    pointer: (isize, isize),
+}
+
 pub struct Window {
     pub kind: Kind,
     pub title: String,
@@ -275,6 +316,65 @@ impl Window {
         }
     }
 
+    /// Which edges, if any, a press at this point grabs for a resize.
+    ///
+    /// The band is inside the window rather than straddling its edge. Straddling
+    /// would put half the target on the desktop, where a press is already
+    /// spoken for — it opens the desktop menu — and would make two overlapping
+    /// windows fight over the pixels between them.
+    ///
+    /// Corners are deliberately more generous than sides: they are the only
+    /// way to change both dimensions at once, and a band just wide enough to
+    /// hit a side is nearly impossible to hit at a corner.
+    fn resize_edges(&self, x: isize, y: isize, margin: usize) -> Edges {
+        let margin = margin as isize;
+        let corner = margin * 3;
+
+        let (left, top) = (self.x, self.y);
+        let (right, bottom) = (
+            self.x + self.width as isize,
+            self.y + self.height as isize,
+        );
+
+        if x < left || x >= right || y < top || y >= bottom {
+            return Edges::default();
+        }
+
+        // A window narrower than two bands would have every press count as
+        // both edges at once, which reads as the window collapsing.
+        let reach = margin.min(self.width as isize / 3).min(self.height as isize / 3);
+        let corner = corner.min(self.width as isize / 3).min(self.height as isize / 3);
+
+        let near_left = x < left + reach;
+        let near_right = x >= right - reach;
+        let near_top = y < top + reach;
+        let near_bottom = y >= bottom - reach;
+
+        let corner_left = x < left + corner;
+        let corner_right = x >= right - corner;
+        let corner_top = y < top + corner;
+        let corner_bottom = y >= bottom - corner;
+
+        // Within the corner square, both of its edges are grabbed even when
+        // the pointer is only close enough to one of them.
+        let in_corner = (corner_left || corner_right) && (corner_top || corner_bottom);
+        if in_corner {
+            return Edges {
+                left: corner_left,
+                right: corner_right,
+                top: corner_top,
+                bottom: corner_bottom,
+            };
+        }
+
+        Edges {
+            left: near_left,
+            right: near_right,
+            top: near_top,
+            bottom: near_bottom,
+        }
+    }
+
     fn contains_title(&self, x: isize, y: isize) -> bool {
         x >= self.x
             && x < self.x + self.width as isize
@@ -327,6 +427,13 @@ pub struct Desktop {
     focused: usize,
     /// Window being dragged, and the grab offset within its title bar.
     dragging: Option<(usize, isize, isize)>,
+    /// Window being resized, if any. Never set at the same time as `dragging`:
+    /// one press starts one or the other.
+    resizing: Option<Resize>,
+    /// Set when a resize changed a terminal window, so the shell knows to
+    /// refill it for the new row count. The compositor cannot do it itself —
+    /// the scrollback belongs to the shell.
+    terminal_resized: bool,
     /// The launcher is a small application menu, opened from the panel.
     launcher_open: bool,
     /// Kept locally so one held mouse button produces exactly one panel click.
@@ -411,6 +518,8 @@ impl Desktop {
             windows: Vec::new(),
             focused: 0,
             dragging: None,
+            resizing: None,
+            terminal_resized: false,
             launcher_open: false,
             left_was_down: false,
             last_cursor: (cursor_x as isize, cursor_y as isize),
@@ -522,10 +631,108 @@ impl Desktop {
         self.windows.remove(index);
 
         // Every index after the removed one has shifted, including the one
-        // being dragged — simplest and safest is to drop the drag entirely.
+        // being dragged or resized — simplest and safest is to drop both.
         self.dragging = None;
+        self.resizing = None;
         self.focused = self.focused.min(self.windows.len().saturating_sub(1));
         self.invalidate_all();
+    }
+
+    /// The smallest a window may be dragged to.
+    ///
+    /// Enough title bar left to grab and to hold the close button, and enough
+    /// body for a couple of rows of text. A window allowed to reach zero could
+    /// not be grabbed again, which makes it unrecoverable rather than small.
+    fn minimum_size(&self) -> (usize, usize) {
+        let width = (self.m.title_height * 4).max(self.m.grab * 8);
+        let height = self.m.title_height + self.m.cell_h * 2 + self.m.grab * 2;
+        (width, height)
+    }
+
+    /// Recompute a resizing window's rectangle from where the drag started.
+    fn apply_resize(&mut self, resize: Resize, x: isize, y: isize) {
+        let (start_x, start_y, start_w, start_h) = resize.rect;
+        let (min_w, min_h) = self.minimum_size();
+
+        let Some(window) = self.windows.get_mut(resize.index) else {
+            self.resizing = None;
+            return;
+        };
+
+        let dx = x - resize.pointer.0;
+        let dy = y - resize.pointer.1;
+
+        let mut new_x = start_x;
+        let mut new_y = start_y;
+        let mut new_w = start_w as isize;
+        let mut new_h = start_h as isize;
+
+        // A pulled left or top edge moves the origin as well as the size; a
+        // right or bottom edge only changes the size.
+        if resize.edges.left {
+            new_x = start_x + dx;
+            new_w = start_w as isize - dx;
+        }
+        if resize.edges.right {
+            new_w = start_w as isize + dx;
+        }
+        if resize.edges.top {
+            new_y = start_y + dy;
+            new_h = start_h as isize - dy;
+        }
+        if resize.edges.bottom {
+            new_h = start_h as isize + dy;
+        }
+
+        // Clamping pushes the *moving* edge back, never the anchored one, so
+        // the edge the user is not touching stays exactly where it was.
+        if new_w < min_w as isize {
+            if resize.edges.left {
+                new_x -= min_w as isize - new_w;
+            }
+            new_w = min_w as isize;
+        }
+        if new_h < min_h as isize {
+            if resize.edges.top {
+                new_y -= min_h as isize - new_h;
+            }
+            new_h = min_h as isize;
+        }
+
+        let (old_x, old_y, old_w, old_h) = (window.x, window.y, window.width, window.height);
+        let (new_w, new_h) = (new_w as usize, new_h as usize);
+
+        if (old_x, old_y, old_w, old_h) == (new_x, new_y, new_w, new_h) {
+            return;
+        }
+
+        window.x = new_x;
+        window.y = new_y;
+        window.width = new_w;
+        window.height = new_h;
+
+        // Text held for more rows than now fit would otherwise sit in the
+        // buffer unseen and reappear on the next growth.
+        let rows = window.rows();
+        if window.lines.len() > rows {
+            let excess = window.lines.len() - rows;
+            window.lines.drain(0..excess);
+        }
+
+        if window.kind == Kind::Terminal {
+            self.terminal_resized = true;
+        }
+
+        // Both rectangles: the one vacated and the one now covered. Anything
+        // outside them is never repainted, which is how a shrinking window
+        // would otherwise leave its old edge printed on the wallpaper.
+        self.invalidate_window_rect(old_x, old_y, old_w, old_h);
+        self.invalidate_window_rect(new_x, new_y, new_w, new_h);
+    }
+
+    /// Did a resize change the terminal's shape since this was last asked?
+    pub fn take_terminal_resized(&mut self) -> bool {
+        core::mem::take(&mut self.terminal_resized)
     }
 
     /// A window the user asked for that does not exist yet.
@@ -2255,10 +2462,31 @@ impl Desktop {
     /// everything else — a program's window is composited like any other and
     /// cannot paint outside its own rectangle.
     fn draw_surface(&mut self, index: usize, x: isize, y: isize) {
-        let (width, height) = (
+        let (mut width, mut height) = (
             self.windows[index].surface_width,
             self.windows[index].surface_height,
         );
+
+        // A surface is whatever size the program asked for, and the window can
+        // now be dragged smaller than that. `plot` clips to the damage region,
+        // not to the window, so without this a shrunken window would let the
+        // program keep painting over the desktop beyond its own frame — the
+        // same class of bug as text escaping a window, and just as invisible
+        // until something moves.
+        let window = &self.windows[index];
+        let interior_w = window.width.saturating_sub(2 * self.m.border);
+        let interior_h = window
+            .height
+            .saturating_sub(window.title_height + self.m.border);
+        width = width.min(interior_w);
+        height = height.min(interior_h);
+
+        // The rows are copied out of a buffer `surface_width` wide, so a
+        // narrowed view still has to step by the original stride.
+        let stride = self.windows[index].surface_width;
+        if stride == 0 || width == 0 || height == 0 {
+            return;
+        }
         // Cloned because plot borrows self mutably. A frame is copied on blit
         // anyway, so this is the same cost the design already accepted.
         let pixels = self.windows[index].surface.clone();
@@ -2280,7 +2508,7 @@ impl Desktop {
                 if px < 0 {
                     continue;
                 }
-                self.plot(px as usize, py as usize, pixels[row * width + column]);
+                self.plot(px as usize, py as usize, pixels[row * stride + column]);
             }
         }
     }
@@ -2468,7 +2696,13 @@ impl Desktop {
 
         if !left {
             self.dragging = None;
+            self.resizing = None;
             self.left_was_down = false;
+            return;
+        }
+
+        if let Some(resize) = self.resizing {
+            self.apply_resize(resize, x, y);
             return;
         }
 
@@ -2616,6 +2850,27 @@ impl Desktop {
                 self.close(index);
                 return;
             }
+            // Before the title bar, so the top edge resizes rather than
+            // moves. The band is a few pixels and the bar is tens of them, so
+            // there is still plenty of bar left to drag by.
+            let edges = self.windows[index].resize_edges(x, y, self.m.grab);
+            if edges.any() {
+                self.focused = index;
+                self.resizing = Some(Resize {
+                    index,
+                    edges,
+                    rect: (
+                        self.windows[index].x,
+                        self.windows[index].y,
+                        self.windows[index].width,
+                        self.windows[index].height,
+                    ),
+                    pointer: (x, y),
+                });
+                self.invalidate_all();
+                return;
+            }
+
             if self.windows[index].contains_title(x, y) {
                 self.focused = index;
                 self.dragging = Some((index, x - self.windows[index].x, y - self.windows[index].y));

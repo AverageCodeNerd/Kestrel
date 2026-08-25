@@ -592,8 +592,36 @@ fn send_keys(text: &str) -> std::io::Result<usize> {
             // `{mouse:dx,dy}` and `{click}` drive the pointer rather than the
             // keyboard, so a desktop can be exercised the same way.
             if let Some(delta) = name.strip_prefix("mouse:") {
-                writeln!(stream, "mouse_move {}", delta.replace(',', " "))?;
-                stream.flush()?;
+                let (dx, dy) = delta.split_once(',').unwrap_or((delta, "0"));
+                let dx: i32 = dx.trim().parse().unwrap_or(0);
+                let dy: i32 = dy.trim().parse().unwrap_or(0);
+
+                // A PS/2 movement packet carries 9-bit two's complement
+                // deltas, so anything past 255 sets the overflow flag — and an
+                // overflowed packet carries no usable magnitude, so the driver
+                // correctly throws the whole thing away, button state
+                // included. Sending `mouse_move 1495 550` therefore moves
+                // nothing at all, silently. Splitting into small steps is also
+                // closer to what a real mouse emits.
+                const STEP: i32 = 100;
+                let steps = (dx.abs().max(dy.abs()) + STEP - 1) / STEP;
+                let steps = steps.max(1);
+
+                for step in 1..=steps {
+                    // Apportioned from the running total rather than by adding
+                    // a rounded quotient each time, so the pointer lands
+                    // exactly on the requested delta instead of a few pixels
+                    // short of it.
+                    let so_far_x = dx * (step - 1) / steps;
+                    let so_far_y = dy * (step - 1) / steps;
+                    let next_x = dx * step / steps;
+                    let next_y = dy * step / steps;
+
+                    writeln!(stream, "mouse_move {} {}", next_x - so_far_x, next_y - so_far_y)?;
+                    stream.flush()?;
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+
                 std::thread::sleep(Duration::from_millis(40));
                 sent += 1;
                 continue;
