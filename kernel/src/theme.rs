@@ -183,6 +183,9 @@ pub struct Theme {
     // ---- content ----
     pub show_shortcuts: bool,
     pub show_status: bool,
+    /// Start the desktop instead of the console prompt. The console is one
+    /// Escape away whatever this is set to.
+    pub boot_to_desktop: bool,
     /// The clock, the address and the memory gauge at the end of the panel.
     pub show_clock: bool,
     /// Whole hours added to the RTC, since nothing here knows about time
@@ -236,6 +239,7 @@ impl Default for Theme {
 
             show_shortcuts: true,
             show_status: true,
+            boot_to_desktop: true,
             show_clock: true,
             clock_offset: 0,
             status_text: String::from("Experimental OS"),
@@ -304,6 +308,7 @@ pub const KEYS: &[&str] = &[
     "clock",
     "clock.offset",
     "status.text",
+    "desktop.boot",
 ];
 
 impl Theme {
@@ -344,6 +349,7 @@ impl Theme {
             "clock" => flag(self.show_clock),
             "clock.offset" => self.clock_offset.to_string(),
             "status.text" => self.status_text.clone(),
+            "desktop.boot" => flag(self.boot_to_desktop),
             _ => return None,
         })
     }
@@ -411,6 +417,7 @@ impl Theme {
             }
             "status" => self.show_status = parse_flag(value)?,
             "status.text" => self.status_text = value.to_string(),
+            "desktop.boot" => self.boot_to_desktop = parse_flag(value)?,
             _ => return Err(format!("no such setting: {key}")),
         }
         Ok(())

@@ -127,6 +127,12 @@ impl Shell {
             print!("{}", String::from_utf8_lossy(&motd));
         }
         println!();
+
+        // The default experience is the desktop; the console is one Escape
+        // away, or forever away with `set desktop.boot off` and a reboot.
+        if crate::theme::current().boot_to_desktop {
+            self.desktop();
+        }
         self.prompt();
 
         loop {
@@ -546,9 +552,11 @@ impl Shell {
             // because the compositor is driven by this very task.
             self.pump_desktop();
 
-            // Collect anything that has already finished, so a program that
-            // spawns nothing still lets the reaper run.
-            task::reap();
+            // Collect whatever else has finished, but not the task being
+            // waited on: reaping it here would throw away the exit code this
+            // loop is still polling for, and a program killed by a fault would
+            // then be reported as a silent success.
+            task::reap_keeping(id);
             task::yield_now();
             x86_64::instructions::hlt();
         }
@@ -734,6 +742,17 @@ impl Shell {
             // inside the pump would have it call back into itself.
             if let Some(name) = crate::desktop::with(|d| d.take_run_request()).flatten() {
                 println!("exec {name}");
+                self.execute(&alloc::format!("exec {name}"));
+                self.prompt();
+            }
+
+            // A program the media offers but nothing has installed yet: the
+            // launcher shows it as install-and-run, so `store install` here is
+            // answered by `exec` the honest way rather than disguised inside
+            // the compositor.
+            if let Some(name) = crate::desktop::with(|d| d.take_install_request()).flatten() {
+                println!("store install {name}");
+                self.execute(&alloc::format!("store install {name}"));
                 self.execute(&alloc::format!("exec {name}"));
                 self.prompt();
             }

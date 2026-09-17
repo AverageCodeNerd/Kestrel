@@ -33,8 +33,9 @@ system as a hard disk image, which is the better choice if you want files to
 survive a reboot — booted from the ISO there is no writable disk, so `/disk`
 is absent.
 
-Type `help` for the command list, `version` for what this build is, and
-`desktop` for the windowed interface (Esc returns to the console).
+Type `help` for the command list and `version` for what this build is. The
+system boots straight into the windowed desktop; press Esc to drop to the
+console, and run `desktop` to bring it back.
 
 Known limitations are listed under [Status](#status); the short version is that
 there is no TLS, so `fetch` reaches http:// but not https://.
@@ -88,6 +89,15 @@ update                          what is on offer
 update install                  take it
 ```
 
+The `where to look` half ships in the build driver: **`cargo xtask serve`**
+builds a release kernel, stages exactly the payload the disk and disc images
+ship, and serves it over plain HTTP — the obvious source for a machine booted
+from `build/` or a local VM. It prints the addresses a guest needs; QEMU's
+fake network reaches the host as `10.0.2.2`. Useful flags: `--no-build` to
+serve what is already staged, `--dir <path>` to choose where the payload is
+written, `--port N` to change the port (default 8088), and `--debug` to serve
+a debug kernel instead of the release one.
+
 Nothing is written until every file has arrived and been checked, the outgoing
 kernel is kept as `kestrel.old`, and the boot menu offers it — so a bad update
 is a menu choice away from being undone rather than final.
@@ -110,10 +120,12 @@ cannot be shipped without a description or described without being shipped.
 
 ## Making it yours
 
-The launcher has a search field: open it and type. `ter` finds the terminal,
-`sn` finds Snake, and Enter runs whatever is selected - windows and installed
-packages both, so a program is one keystroke away from the desktop rather than
-a command away. Arrow keys move the selection, Escape closes it.
+The launcher has a search field: press **F1** (or click the button at the panel's
+left end) to open it, then type. `ter` finds the terminal, `sn` finds Snake, and
+Enter runs whatever is selected. It lists the windows and *every* program the
+media offers: one that is not installed yet is installed and then run in a single
+step, so the first run of anything is one keystroke away rather than a detour
+through the Software window. Arrow keys move the selection, Escape closes it.
 
 **Right-click** the wallpaper for a context menu - open a terminal, make a
 folder, change the wallpaper, refresh - or the panel, which offers the windows,
@@ -149,11 +161,12 @@ set desktop.top #204060     any #rrggbb, or a name like 'blue'
 set status.text Hello       the panel's corner text
 set clock off               hide the clock, address and memory gauge
 set clock.offset 2          shift the clock, which has no time zones
+set desktop.boot off        start at the console instead of the desktop
 theme save                  keep it, at /disk/desktop.conf
 ```
 
 Settings are loaded at boot, so the desktop is already yours the first time you
-open it. The file is plain `key = value` text and can be edited directly;
+open it, and with `desktop.boot` on it is the first thing you see. The file is plain `key = value` text and can be edited directly;
 unknown keys and bad values are reported and skipped rather than being allowed
 to stop the desktop starting.
 
@@ -220,6 +233,7 @@ cargo xtask run --headless --timeout 8            # no window; serial to build/s
 cargo xtask run --screenshot build/boot.png       # capture the framebuffer
 cargo xtask run --keys "ls\nps\n"                 # type into the guest, then exit
 cargo xtask run --image --keep-image              # don't regenerate the disk
+cargo xtask serve --release                       # stage and serve an update payload
 ```
 
 `--keys` also names keys that have no character, inline: `"ab{left}X{up}"`.
@@ -354,6 +368,8 @@ xtask/
   src/image.rs       GPT partitioning and the VHD footer
   src/png.rs         PPM screendumps to PNG, dependency-free
   src/crc.rs         CRC-32, shared by PNG chunks and GPT headers
+  src/test.rs        smoke suite driving a real guest over its serial port
+  src/serve.rs       stage and serve an update payload over plain HTTP
 tools/
   font.py            the console font, drawn as ASCII art; regenerates
                      kernel/src/font.rs

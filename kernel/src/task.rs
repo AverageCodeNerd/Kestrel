@@ -447,6 +447,18 @@ pub fn schedule() {
 /// Done here rather than at exit because a task cannot free the stack it is
 /// still standing on — it has to be gone first.
 pub fn reap() -> usize {
+    reap_keeping(0)
+}
+
+/// Reap, but never the task with id `keep`.
+///
+/// A task waiting on another (`shell::wait_for`) reads its exit code through
+/// `outcome`, and a reaped task has no code left to read. Reaping between the
+/// waiter's polls would turn a program killed by a fault — exit 139 — into the
+/// silent success `outcome` reports for a task it cannot find. The waiter
+/// protects the id it is waiting for so that cannot happen. Zero is safe as
+/// "nothing": task ids start at one.
+pub fn reap_keeping(keep: u64) -> usize {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut scheduler = SCHEDULER.lock();
         let mut collected = 0;
@@ -462,8 +474,9 @@ pub fn reap() -> usize {
             };
 
             let before = scheduler.queues[cpu].len();
-            scheduler.queues[cpu]
-                .retain(|task| task.state != State::Finished || task.id == current_id);
+            scheduler.queues[cpu].retain(|task| {
+                task.state != State::Finished || task.id == current_id || task.id == keep
+            });
             collected += before - scheduler.queues[cpu].len();
 
             // Removing entries shifts everything after them, so re-find the

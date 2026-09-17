@@ -29,8 +29,23 @@ use crate::net::http;
 const KERNEL_PATH: &str = "/disk/boot/kestrel";
 const PREVIOUS_PATH: &str = "/disk/boot/kestrel.old";
 const REPOSITORY: &str = "/disk/repo";
-/// Where the update source is remembered between boots.
+/// Where the update source is remembered when there is a writable disk.
 const SOURCE_PATH: &str = "/disk/update.conf";
+/// Where it is remembered when there is not. Same rule as installed programs:
+/// a boot with no writable disk still lets you update; it just forgets the
+/// source at reboot.
+const SOURCE_RAM: &str = "/update.conf";
+
+/// Where the source is remembered on this machine, disk when there is one to
+/// write to and RAM otherwise — judged by whether the disk is actually there
+/// rather than by how the system was booted.
+fn source_path() -> &'static str {
+    if crate::vfs::list("/disk").is_ok() {
+        SOURCE_PATH
+    } else {
+        SOURCE_RAM
+    }
+}
 
 /// Generous on purpose. This stack has no reassembly queue, so a lost segment
 /// costs a full retransmission timeout and throughput is poor — a kernel is
@@ -66,15 +81,16 @@ pub fn running_version() -> String {
         .to_string()
 }
 
-/// Where updates come from. Remembered on disk so it survives a reboot.
+/// Where updates come from. Remembered on disk, or in RAM when there is no
+/// disk, so `update from` works on any medium.
 pub fn source() -> Option<String> {
-    let bytes = crate::vfs::read(SOURCE_PATH).ok()?;
+    let bytes = crate::vfs::read(source_path()).ok()?;
     let text = String::from_utf8_lossy(&bytes).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
 pub fn set_source(url: &str) -> Result<(), String> {
-    crate::vfs::write(SOURCE_PATH, url.trim().as_bytes())
+    crate::vfs::write(source_path(), url.trim().as_bytes())
         .map_err(|e| format!("could not remember the source: {}", e.as_str()))
 }
 
@@ -186,7 +202,14 @@ pub fn apply(base: &str, manifest: &Manifest) -> Result<Report, String> {
     }
 
     crate::vfs::write(KERNEL_PATH, &kernel)
-        .map_err(|e| format!("could not write the kernel: {}", e.as_str()))?;
+        .map_err(|e| {
+            let medium = if crate::vfs::list("/disk").is_err() {
+                " (no writable disk on this media - update from the disk image or .vhd)"
+            } else {
+                ""
+            };
+            format!("could not write the kernel: {}{medium}", e.as_str())
+        })?;
 
     let mut written = 0;
     for (name, body) in &downloaded {

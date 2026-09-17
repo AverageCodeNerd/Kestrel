@@ -165,6 +165,8 @@ pub fn layout(
         "Shortcuts", Control::Toggle("shortcuts", theme));
     row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
         "Status text", Control::Toggle("status", theme));
+    row(&mut items, left, &mut cursor, interior, cell_w, row_height, step,
+        "Boot to desktop", Control::Toggle("desktop.boot", theme));
 
     // ---- save and reset ------------------------------------------------
     cursor += 4 * scale as isize;

@@ -10,6 +10,7 @@ mod lint;
 mod image;
 mod iso;
 mod png;
+mod serve;
 mod test;
 
 use std::io::Write;
@@ -22,6 +23,7 @@ const TARGET: &str = "x86_64-unknown-none";
 const MONITOR_PORT: u16 = 55555;
 const SERIAL_PORT: u16 = 55556;
 
+#[derive(Clone)]
 struct Options {
     release: bool,
     headless: bool,
@@ -139,13 +141,58 @@ fn main() {
             assemble_esp(&opts);
             build_iso();
         }
+        // Serve an update to a running Kestrel, the way the machine can bring
+        // itself up to date from inside. Release by default: a debug kernel is
+        // almost twenty times larger and takes minutes to download over the
+        // kernel's own slow TCP.
+        "serve" => {
+            let debug = args.iter().any(|a| a == "--debug");
+            let mut serve_opts = opts.clone();
+            serve_opts.release = !debug;
+
+            if !args.iter().any(|a| a == "--no-build") {
+                build_kernel(&serve_opts);
+                build_user_programs(&serve_opts);
+                assemble_esp(&serve_opts);
+            }
+
+            let dir = flag_value(&args, "--dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace_root().join("build/update"));
+            let port = flag_value(&args, "--port")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(serve::DEFAULT_PORT);
+
+            let names: Vec<&str> = PACKAGES.iter().map(|p| p.name).collect();
+            match serve::stage(&workspace_root(), &dir, &names) {
+                Ok(staged) => {
+                    println!(
+                        "update payload: {} ({}, kernel {} bytes, {} packages)",
+                        dir.display(),
+                        staged.version,
+                        staged.kernel_size,
+                        staged.package_count
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+
+            if let Err(e) = serve::serve(&dir, port) {
+                eprintln!("update server failed: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: cargo xtask [build|run|image|iso|test|lint|icon]");
+            eprintln!("usage: cargo xtask [build|run|image|iso|test|lint|icon|serve]");
             eprintln!("                   [--release] [--headless] [--image] [--vhd] [--iso]");
             eprintln!("                   [--screenshot <file.png>] [--keys <text>]");
             eprintln!("                   [--serial-keys <text>] [--cpus N] [--pcap <file>]");
             eprintln!("                   [--timeout <secs>] [--skip-net]");
+            eprintln!("                   serve: [--port N] [--dir <path>] [--no-build] [--debug]");
             std::process::exit(2);
         }
     }
@@ -479,6 +526,25 @@ fn run_tests(opts: &Options, skip_network: bool, source_failures: usize) -> ! {
         .spawn()
         .expect("failed to start qemu");
 
+    // The suite checks that a running system can be updated from inside. That
+    // needs a server to update *from*: stage the same payload an image build
+    // ships and serve it on the port the guest can reach. It dies with this
+    // process when run_tests exits.
+    if !skip_network {
+        let root = workspace_root();
+        let dir = root.join("build/update");
+        let names: Vec<&str> = PACKAGES.iter().map(|p| p.name).collect();
+        std::thread::spawn(move || {
+            if let Err(e) = serve::stage(&root, &dir, &names) {
+                eprintln!("update server: could not stage the payload: {e}");
+                return;
+            }
+            if let Err(e) = serve::serve(&dir, serve::DEFAULT_PORT) {
+                eprintln!("update server: {e}");
+            }
+        });
+    }
+
     let failed = test::run(skip_network) + source_failures;
 
     // The kernel never exits, so the guest is always killed rather than
@@ -647,6 +713,7 @@ fn send_keys(text: &str) -> std::io::Result<usize> {
                 "del" => Some("delete".into()),
                 "bs" => Some("backspace".into()),
                 "esc" => Some("esc".into()),
+                "f1" => Some("f1".into()),
                 // Loudly, rather than silently dropping it: a misspelled key
                 // name looks exactly like the guest ignoring the keystroke,
                 // and that has already cost a full test run.
@@ -655,7 +722,7 @@ fn send_keys(text: &str) -> std::io::Result<usize> {
                         std::io::ErrorKind::InvalidInput,
                         format!(
                             "unknown key name '{{{other}}}' in --keys; known: \
-                             up down left right home end del bs click rclick release mouse:dx,dy"
+                             up down left right home end del bs esc f1 click rclick release mouse:dx,dy"
                         ),
                     ))
                 }

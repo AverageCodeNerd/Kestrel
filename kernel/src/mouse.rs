@@ -32,7 +32,13 @@ const CONFIG_PORT2_CLOCK_OFF: u8 = 1 << 5;
 /// Mouse commands.
 const SET_DEFAULTS: u8 = 0xF6;
 const ENABLE_REPORTING: u8 = 0xF4;
+const SET_SAMPLE_RATE: u8 = 0xF3;
+const READ_DEVICE_TYPE: u8 = 0xF2;
 const ACK: u8 = 0xFA;
+
+/// The device id that answers `READ_DEVICE_TYPE`: an IntelliMouse, whose
+/// packets carry a fourth byte for the wheel.
+const DEVICE_WHEEL: u8 = 0x03;
 
 /// Packet byte 0.
 const FLAG_LEFT: u8 = 1 << 0;
@@ -55,9 +61,13 @@ static LEFT: AtomicBool = AtomicBool::new(false);
 static RIGHT: AtomicBool = AtomicBool::new(false);
 static MIDDLE: AtomicBool = AtomicBool::new(false);
 static MOVED: AtomicBool = AtomicBool::new(false);
+/// Whether the mouse speaks IntelliMouse (four-byte packets with a wheel).
+static WHEEL_MODE: AtomicBool = AtomicBool::new(false);
+/// Wheel notches that have turned but not been read. Positive is up.
+static WHEEL: AtomicI32 = AtomicI32::new(0);
 
-/// Partially assembled packet.
-static PACKET: spin::Mutex<[u8; 3]> = spin::Mutex::new([0; 3]);
+/// Partially assembled packet: three bytes, or four once a wheel is in use.
+static PACKET: spin::Mutex<[u8; 4]> = spin::Mutex::new([0; 4]);
 static PACKET_INDEX: AtomicI32 = AtomicI32::new(0);
 
 fn wait_writable() -> bool {
@@ -121,6 +131,14 @@ fn mouse_command(byte: u8) -> bool {
     matches!(read_data(), Some(ACK))
 }
 
+/// Send a data byte to the mouse itself, after a command byte.
+fn mouse_data(byte: u8) -> bool {
+    if !command(ADDRESS_PORT2) || !write_data(byte) {
+        return false;
+    }
+    matches!(read_data(), Some(ACK))
+}
+
 /// Where the cursor may go. Called once the framebuffer size is known.
 pub fn set_bounds(width: usize, height: usize) {
     MAX_X.store(width as i32 - 1, Ordering::Relaxed);
@@ -139,6 +157,17 @@ pub fn buttons() -> (bool, bool, bool) {
         RIGHT.load(Ordering::Relaxed),
         MIDDLE.load(Ordering::Relaxed),
     )
+}
+
+/// Wheel notches turned since the last call; positive means up.
+///
+/// The desktop drains this each frame and turns it into scrolling. The wheel
+/// has to be read to its own lane rather than folded into the cursor: before
+/// it was supported, a wheel event was a stray byte that the three-byte packet
+/// receiver mistook for movement, and scrolling a menu flickered to the top
+/// and back.
+pub fn take_wheel() -> i32 {
+    WHEEL.swap(0, Ordering::Relaxed)
 }
 
 /// Has anything changed since the last call? Clears the flag.
@@ -164,7 +193,10 @@ pub fn handle_interrupt() {
         packet[index as usize] = byte;
     }
 
-    if index < 2 {
+    // A wheeled mouse moves in four-byte packets; the fourth byte is the wheel.
+    let bytes = if WHEEL_MODE.load(Ordering::Relaxed) { 3 } else { 2 };
+
+    if index < bytes {
         PACKET_INDEX.store(index + 1, Ordering::Relaxed);
         return;
     }
@@ -177,6 +209,14 @@ pub fn handle_interrupt() {
     // than lurch the cursor across the screen.
     if flags & (FLAG_X_OVERFLOW | FLAG_Y_OVERFLOW) != 0 {
         return;
+    }
+
+    if WHEEL_MODE.load(Ordering::Relaxed) {
+        // The fourth byte is a signed 8-bit wheel delta.
+        let wheel = packet[3] as i8 as i32;
+        if wheel != 0 {
+            WHEEL.fetch_add(wheel, Ordering::Relaxed);
+        }
     }
 
     LEFT.store(flags & FLAG_LEFT != 0, Ordering::Relaxed);
@@ -225,9 +265,26 @@ pub fn init() -> bool {
     }
 
     // Defaults first, then start reporting. A mouse that acknowledges both is
-    // definitely present.
+    // definitely present. In between, ask for the IntelliMouse extension (a
+    // wheel) with the sample-rate magic; the device id that comes back says
+    // whether it took. A mouse that does not is fine - it just stays on the
+    // three-byte protocol - so a failed magic must not abort `init`.
     if !mouse_command(SET_DEFAULTS) {
         return false;
     }
+
+    let mut wheel_mode = false;
+    if mouse_command(SET_SAMPLE_RATE)
+        && mouse_data(200)
+        && mouse_command(SET_SAMPLE_RATE)
+        && mouse_data(100)
+        && mouse_command(SET_SAMPLE_RATE)
+        && mouse_data(80)
+        && mouse_command(READ_DEVICE_TYPE)
+    {
+        wheel_mode = matches!(read_data(), Some(DEVICE_WHEEL));
+    }
+    WHEEL_MODE.store(wheel_mode, Ordering::Relaxed);
+
     mouse_command(ENABLE_REPORTING)
 }

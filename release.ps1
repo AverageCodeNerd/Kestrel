@@ -40,13 +40,23 @@ try {
     # 0.9.1 as a row of question marks. The check lives in xtask so that
     # `cargo xtask lint`, `cargo xtask test` and this script all run the same
     # implementation rather than three that drift apart.
-    cargo xtask lint
-    if ($LASTEXITCODE -ne 0) { throw "source checks failed" }
+    # Cargo writes its progress to stderr, and Windows PowerShell 5.1 turns
+    # each such line into a terminating error once $ErrorActionPreference is
+    # "Stop". Relax it around these calls; the $LASTEXITCODE checks keep the
+    # script strict where it matters.
+    $strict = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        cargo xtask lint
+        if ($LASTEXITCODE -ne 0) { throw "source checks failed" }
 
-    # Always release-profile: the debug kernel is ~18x larger and takes about
-    # half a minute to boot off an emulated CD.
-    cargo xtask image --release
-    if ($LASTEXITCODE -ne 0) { throw "image build failed" }
+        # Always release-profile: the debug kernel is ~18x larger and takes
+        # about half a minute to boot off an emulated CD.
+        cargo xtask image --release
+        if ($LASTEXITCODE -ne 0) { throw "image build failed" }
+    } finally {
+        $ErrorActionPreference = $strict
+    }
 
     $out = "$root\release\kestrel-$version"
     New-Item -ItemType Directory -Force -Path $out | Out-Null

@@ -170,7 +170,27 @@ pub const CHECKS: &[Check] = &[
         reject: &["timed out", "failed"],
         network: true,
     },
+
+    // The update loop, short of installing. The suite spins up the same server
+    // a person would (`cargo xtask serve`) and asks the guest to describe what
+    // it offers; installing is deliberately not tested here because a debug
+    // kernel is megabytes and would take the whole suite hostage over the
+    // kernel's own slow TCP. This proves the fetch, the manifest parse and the
+    // offer listing all work against a real payload.
+    Check {
+        name: "an update is offered over HTTP",
+        setup: &["update from http://10.0.2.2:8088/"],
+        command: "update",
+        expect: &["offered", "a kernel of ", "packages"],
+        reject: &["update: ", "timed out"],
+        network: true,
+    },
 ];
+
+/// The URL above hardcodes the port the suite serves on; this is the single
+/// real source of it, so changing one and not the other fails to compile
+/// rather than failing a test that mentions the port in a confusing way.
+const _: () = assert!(super::serve::DEFAULT_PORT == 8088);
 
 /// A live serial console on the running guest.
 struct Session {

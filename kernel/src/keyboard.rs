@@ -181,6 +181,8 @@ pub const KEY_RIGHT: u8 = 0x83;
 pub const KEY_HOME: u8 = 0x84;
 pub const KEY_END: u8 = 0x85;
 pub const KEY_DELETE: u8 = 0x86;
+/// F1, which the desktop uses to open its launcher.
+pub const KEY_F1: u8 = 0x87;
 /// Escape, which the tables below cannot carry because it has no character.
 pub const KEY_ESCAPE: u8 = 0x1B;
 
@@ -282,6 +284,15 @@ pub fn handle_interrupt() {
     if code == 0x01 {
         if !released {
             BUFFER.lock().push(KEY_ESCAPE);
+        }
+        return;
+    }
+
+    // F1 likewise: it names no character, and the desktop reads it as "open
+    // the launcher" so the app menu is reachable without the mouse.
+    if code == 0x3B {
+        if !released {
+            BUFFER.lock().push(KEY_F1);
         }
         return;
     }

@@ -21,12 +21,18 @@ pub enum Target {
     Window(Kind),
     /// An installed package, run by name the way `exec` runs it.
     Program(String),
+    /// Something the media carries but nothing has installed yet. Picking it
+    /// installs it and then runs it, so the launcher stays the one place to
+    /// open things rather than a two-step detour through the Software window.
+    InstallAndRun(String),
 }
 
 #[derive(Clone)]
 pub struct LauncherEntry {
     pub name: String,
     pub detail: String,
+    /// Whether `target` can run right now. False only for `InstallAndRun`.
+    pub installed: bool,
     pub target: Target,
 }
 
@@ -455,9 +461,20 @@ pub struct Desktop {
     search: String,
     /// The entry the keyboard is on, as opposed to the one the pointer is on.
     selected: usize,
+    /// Which entry is at the top of the launcher's window on screen.
+    ///
+    /// Kept apart from `selected` so the wheel scrolls the list underneath a
+    /// stationary pointer: if the window were derived from the keyboard
+    /// selection, moving the pointer and turning the wheel would fight each
+    /// other and the menu would flicker between the top and wherever the
+    /// pointer is.
+    launcher_scroll: usize,
     /// A program the user picked from the launcher. Run by the shell, outside
     /// the compositor's lock, for the same reason everything else here is.
     run_request: Option<String>,
+    /// A program the user picked that has to be installed first. The shell
+    /// installs it and then runs it, again outside the compositor's lock.
+    install_request: Option<String>,
     /// The open context menu, if any: where it is and what is in it.
     menu: Option<(isize, isize, Vec<crate::menu::Item>)>,
     /// The menu entry the pointer is over.
@@ -534,7 +551,9 @@ impl Desktop {
             launcher_items: Vec::new(),
             search: String::new(),
             selected: 0,
+            launcher_scroll: 0,
             run_request: None,
+            install_request: None,
             menu: None,
             menu_hover: None,
             right_was_down: false,
@@ -865,13 +884,58 @@ impl Desktop {
         }
     }
 
+    /// How many rows the launcher can show at once.
+    ///
+    /// Measured from the gap between the panel and the far edge of the screen,
+    /// not from the entries: listing every program the media offers, rather
+    /// than only the installed ones, would otherwise push the menu off the
+    /// bottom of anything smaller than a 4K panel.
+    fn launcher_rows(&self) -> usize {
+        let header = self.m.launcher_header as usize;
+        let step = self.m.launcher_row_step.max(1) as usize;
+        let margin = self.m.gap as usize;
+        let space = self
+            .height
+            .saturating_sub(self.m.panel_height + 4 + margin);
+        space.saturating_sub(header).checked_div(step).unwrap_or(0).max(1)
+    }
+
+    /// How many entries are on screen, and which one is at the top.
+    ///
+    /// The wheel and the arrows both move the list through this one
+    /// description of where the rows are — the rule the rest of this file is
+    /// built on. `launcher_scroll` is the top entry; `selected` is overlaid on
+    /// top of it, and the arrows nudge the scroll to keep the selection in
+    /// view.
+    fn launcher_window(&self) -> (usize, usize) {
+        let rows = self.launcher_rows();
+        let visible = self.launcher_items.len().min(rows);
+        let scroll = self
+            .launcher_scroll
+            .min(self.launcher_items.len().saturating_sub(rows));
+        (scroll, visible)
+    }
+
+    /// Nudge the scroll so the keyboard selection stays on screen.
+    ///
+    /// Called by the arrow keys. The wheel does not need this: it scrolls the
+    /// list under the pointer, which is already on screen by construction.
+    fn scroll_to_selected(&mut self) {
+        let (scroll, visible) = self.launcher_window();
+        if self.selected < scroll {
+            self.launcher_scroll = self.selected;
+        } else if self.selected >= scroll + visible {
+            self.launcher_scroll = self.selected + 1 - visible;
+        }
+    }
+
     /// How tall the launcher is, which depends on how much it is offering.
     ///
     /// Everything that positions or hit-tests the launcher goes through this
     /// and `launcher_width`, so filtering the list moves the menu rather than
     /// leaving rows drawn outside it.
     fn launcher_height(&self) -> usize {
-        let rows = self.launcher_items.len().max(1);
+        let rows = self.launcher_window().1.max(1);
         self.m.launcher_header as usize + rows * self.m.launcher_row_step as usize + GAP * self.m.scale
     }
 
@@ -899,9 +963,10 @@ impl Desktop {
 
     /// Everything the launcher can offer, filtered by what has been typed.
     ///
-    /// Windows first, since they are always there, then whatever is installed.
-    /// Both are matched on their name, so typing "sn" finds Snake and typing
-    /// "set" finds Settings.
+    /// Windows first, since they are always there, then every program the
+    /// media carries - installed or not, because picking one that is not yet
+    /// installed installs and runs it. Both are matched on their name, so
+    /// typing "sn" finds Snake and typing "set" finds Settings.
     fn build_launcher_items(&mut self) {
         let query = self.search.to_ascii_lowercase();
         let matches = |name: &str| {
@@ -915,24 +980,31 @@ impl Desktop {
                 items.push(LauncherEntry {
                     name: String::from(kind.title()),
                     detail: String::from(kind.description()),
+                    installed: true,
                     target: Target::Window(kind),
                 });
             }
         }
 
-        // Installed packages, which is what makes the search worth having:
-        // the four windows fit on screen, the programs will not always.
         for package in crate::store::catalogue() {
-            if crate::store::is_installed(&package.name) && matches(&package.name) {
-                items.push(LauncherEntry {
-                    name: package.name.clone(),
-                    detail: package.summary.clone(),
-                    target: Target::Program(package.name),
-                });
+            if !matches(&package.name) {
+                continue;
             }
+            items.push(LauncherEntry {
+                name: package.name.clone(),
+                detail: package.summary.clone(),
+                installed: package.installed,
+                target: if package.installed {
+                    Target::Program(package.name)
+                } else {
+                    Target::InstallAndRun(package.name)
+                },
+            });
         }
 
         self.selected = self.selected.min(items.len().saturating_sub(1));
+        let max_scroll = items.len().saturating_sub(self.launcher_rows());
+        self.launcher_scroll = self.launcher_scroll.min(max_scroll);
         self.launcher_items = items;
     }
 
@@ -944,6 +1016,7 @@ impl Desktop {
         if self.launcher_open {
             self.search.clear();
             self.selected = 0;
+            self.launcher_scroll = 0;
             self.build_launcher_items();
         } else {
             self.hovered_entry = None;
@@ -981,6 +1054,7 @@ impl Desktop {
                 None => self.open_request = Some(kind),
             },
             Target::Program(name) => self.run_request = Some(name),
+            Target::InstallAndRun(name) => self.install_request = Some(name),
         }
         self.invalidate_all();
     }
@@ -988,6 +1062,11 @@ impl Desktop {
     /// A program the user asked for, taken by the shell to run.
     pub fn take_run_request(&mut self) -> Option<String> {
         self.run_request.take()
+    }
+
+    /// A program the user asked for that has to be installed first.
+    pub fn take_install_request(&mut self) -> Option<String> {
+        self.install_request.take()
     }
 
     fn plot(&mut self, x: usize, y: usize, colour: u32) {
@@ -1294,10 +1373,19 @@ impl Desktop {
     /// "close whatever is open" first, or a menu would be impossible to
     /// dismiss without also throwing away the desktop behind it.
     pub fn take_key(&mut self, byte: u8) -> bool {
-        use crate::keyboard::{KEY_DOWN, KEY_ESCAPE, KEY_UP};
+        use crate::keyboard::{KEY_DOWN, KEY_ESCAPE, KEY_F1, KEY_UP};
 
         if byte == KEY_ESCAPE && self.menu.is_some() {
             self.close_menu();
+            return true;
+        }
+
+        // F1 is the app opener: the one keystroke that reaches the desktop
+        // whether or not the launcher is already up, so it can both open and
+        // dismiss. It is handled before the guard below, which assumes the
+        // launcher is already open.
+        if byte == KEY_F1 {
+            self.toggle_launcher();
             return true;
         }
 
@@ -1318,10 +1406,14 @@ impl Desktop {
                 self.activate_entry(selected);
                 return true;
             }
-            KEY_UP => self.selected = self.selected.saturating_sub(1),
+            KEY_UP => {
+                self.selected = self.selected.saturating_sub(1);
+                self.scroll_to_selected();
+            }
             KEY_DOWN => {
                 let last = self.launcher_items.len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
+                self.scroll_to_selected();
             }
             0x08 => {
                 if self.search.pop().is_none() {
@@ -1746,7 +1838,8 @@ impl Desktop {
             return None;
         }
         let row = (offset / self.m.launcher_row_step) as usize;
-        (row < self.launcher_items.len()).then_some(row)
+        let (first, visible) = self.launcher_window();
+        (row < visible).then(|| first + row).filter(|index| *index < self.launcher_items.len())
     }
 
     fn launcher_region(&self) -> Option<Damage> {
@@ -2235,10 +2328,10 @@ impl Desktop {
 
         // Walks the list the hit testing walks, so the row that lights up is
         // the row that opens.
-        let entries: Vec<(String, String)> = self
+        let entries: Vec<(String, String, bool)> = self
             .launcher_items
             .iter()
-            .map(|entry| (entry.name.clone(), entry.detail.clone()))
+            .map(|entry| (entry.name.clone(), entry.detail.clone(), entry.installed))
             .collect();
         let row_x = x + self.m.gap;
         let row_width = width - 2 * self.m.gap as usize;
@@ -2255,8 +2348,11 @@ impl Desktop {
             return;
         }
 
-        for (index, (name, description)) in entries.iter().enumerate() {
-            let row_y = y + self.m.launcher_header + index as isize * self.m.launcher_row_step;
+        let (first, visible) = self.launcher_window();
+        for index in first..first + visible {
+            let (name, description, installed) = &entries[index];
+            let row_y = y + self.m.launcher_header
+                + (index - first) as isize * self.m.launcher_row_step;
 
             // Only the row under the pointer is highlighted. Painting every
             // row in the selection colour, which is what this used to do, made
@@ -2292,14 +2388,32 @@ impl Desktop {
 
             let backdrop = if hovered { selected } else { base };
             // One cell apart, so the description clears the name.
-            self.draw_text_within(row_x + 10 * scale as isize, row_y + 4 * scale as isize, name, light, text_width);
+            // An uninstalled row sets a right-aligned tag aside for itself, so
+            // the description shortens by its width instead of running under it.
+            let note = "install";
+            let note_width = note.len() * self.m.cell_w;
+            let name_width = if *installed {
+                text_width
+            } else {
+                text_width.saturating_sub(note_width + 12 * scale)
+            };
+            self.draw_text_within(row_x + 10 * scale as isize, row_y + 4 * scale as isize, name, light, name_width);
             self.draw_text_within(
                 row_x + 10 * scale as isize,
                 row_y + 4 * scale as isize + self.m.cell_h as isize,
                 description,
                 logo::blend(light, backdrop, 0.40),
-                text_width,
+                name_width,
             );
+            if !installed {
+                self.draw_text_within(
+                    row_x + row_width as isize - note_width as isize,
+                    row_y + 4 * scale as isize,
+                    note,
+                    logo::blend(light, backdrop, 0.45),
+                    note_width,
+                );
+            }
         }
     }
 
@@ -2650,6 +2764,22 @@ impl Desktop {
             self.last_cursor = (x, y);
         }
 
+        // The wheel scrolls the launcher's list under a stationary pointer.
+        // Drained here, not in `take_key`, because it is a mouse input; and
+        // decoded as its own lane, which is what stops a scroll from being
+        // misread as pointer movement and the menu flashing to the top.
+        let wheel = crate::mouse::take_wheel();
+        if wheel != 0 && self.launcher_open && self.launcher_rows() < self.launcher_items.len() {
+            let max_scroll = self.launcher_items.len() - self.launcher_rows();
+            let next = (self.launcher_scroll as i32 - wheel).clamp(0, max_scroll as i32) as usize;
+            if next != self.launcher_scroll {
+                let previous = self.launcher_region();
+                self.launcher_scroll = next;
+                self.invalidate(previous);
+                self.invalidate(self.launcher_region());
+            }
+        }
+
         // Which launcher row the pointer is over. Tracked on every move, not
         // just on a click, because the highlight is what tells the user what
         // the click will do.
@@ -2657,6 +2787,15 @@ impl Desktop {
         if hovered != self.hovered_entry {
             self.hovered_entry = hovered;
             self.invalidate(self.launcher_region());
+        }
+
+        // A row under the pointer is also the entry Enter runs, so the
+        // highlight and the keyboard choice never disagree on what is about
+        // to be opened.
+        if self.launcher_open {
+            if let Some(row) = self.hovered_entry {
+                self.selected = row;
+            }
         }
 
         // The same, for the context menu.
