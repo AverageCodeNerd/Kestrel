@@ -407,9 +407,10 @@
     </ul>
 
     <p style="margin-top:24px;">
-      Once it boots, type <code>help</code> for the command list,
-      <code>version</code> for what the build is, and <code>desktop</code> for the
-      windowed interface — <kbd>Esc</kbd> returns you to the console.
+      It boots straight into the desktop. <kbd>F1</kbd> opens the launcher,
+      which lists every program in the repository and opens any of them —
+      installing first anything that is not there yet. <kbd>Esc</kbd> drops you
+      to the console, and <code>desktop</code> brings the desktop back.
     </p>
 
     <h3 style="margin-top:34px;">Verify it, rather than trust it</h3>
@@ -452,7 +453,11 @@
       </div>
       <div class="card">
         <h3>Desktop</h3>
-        <p>A compositor with draggable, closable windows, a panel and a launcher, drawing through region-based damage tracking so an idle screen costs nothing.</p>
+        <p>A compositor with draggable, closable windows, a panel and a searchable
+        launcher that opens any program in the repository — installing first
+        anything not installed yet — reachable by <kbd>F1</kbd>, the mouse wheel
+        or the keyboard. Region-based damage tracking means an idle screen costs
+        nothing.</p>
       </div>
       <div class="card">
         <h3>Making things</h3>
@@ -460,11 +465,16 @@
       </div>
       <div class="card">
         <h3>Updates</h3>
-        <p>Kestrel replaces its own kernel and packages from inside itself, keeping the previous kernel and offering it in the boot menu if the new one misbehaves.</p>
+        <p>Kestrel replaces its own kernel and packages from inside itself, keeping
+        the previous kernel and offering it in the boot menu if the new one
+        misbehaves — from any medium, even a read-only CD, where the source
+        is remembered in RAM instead of on disk.</p>
       </div>
       <div class="card">
         <h3>Software</h3>
-        <p>Nothing ships installed. The boot media carries a repository, and the Software window installs from it &mdash; to disk where there is one, to RAM where there is not.</p>
+        <p>Nothing ships installed. The boot media carries a repository, and the
+        launcher — or the Software window — installs and runs from it, to disk
+        where there is one and to RAM where there is not.</p>
       </div>
       <div class="card">
         <h3>Settings</h3>
@@ -483,7 +493,7 @@
     <p>Written plainly, because you will meet these:</p>
     <ul>
       <li><strong>No TLS</strong>, so <code>https://</code> is out of reach — and <code>fetch</code> is a client, not a browser. Nothing renders HTML.</li>
-      <li><strong>The ISO gives you no writable disk.</strong> Boot the VHD or IMG if you want files to persist.</li>
+      <li><strong>The ISO gives you no writable disk.</strong> Installed programs live in RAM and are gone at reboot — boot the VHD or IMG to keep them.</li>
       <li><strong>The keyboard does not work on Hyper-V.</strong> Generation 2 VMs have no PS/2 controller; use the serial console instead.</li>
       <li><strong>One window of each kind.</strong> Windows close with the button on their title bar and reopen from the launcher, but there is no way to have two terminals at once.</li>
       <li><strong>No <code>fork</code>, and no task migration between cores.</strong> Tasks are pinned where they spawn.</li>
