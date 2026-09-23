@@ -44,7 +44,7 @@ jobs:
           else
             REF=$(jq -r '.ref // empty' ctx.json)
             BRANCH=${REF#refs/heads/}
-            SHORT_NAME=$(jq -r '.repository.name // empty' ctx.json)
+            SHORT_NAME=$(jq -r '.event.repository.name // empty' ctx.json)
             COUNT=$(jq '.event.commits | length' ctx.json)
             URL=$(jq -r '.event.compare // empty' ctx.json)
             TITLE="New push to $SHORT_NAME ($BRANCH)"
