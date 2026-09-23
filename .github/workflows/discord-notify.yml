@@ -1,0 +1,69 @@
+name: Discord Notify
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send to Discord
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_CTX: ${{ toJson(github) }}
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::error::DISCORD_WEBHOOK secret is not set on this repository."
+            exit 1
+          fi
+
+          echo "$GITHUB_CTX" > ctx.json
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG=$(jq -r '.event.release.tag_name // empty' ctx.json)
+            NAME=$(jq -r '.event.release.name // empty' ctx.json)
+            BODY=$(jq -r '.event.release.body // empty' ctx.json)
+            URL=$(jq -r '.event.release.html_url // empty' ctx.json)
+            TITLE="Release $TAG published"
+            if [ -n "$NAME" ]; then
+              DESC="$(printf '%s\n\n%s' "$NAME" "$BODY")"
+            else
+              DESC="$BODY"
+            fi
+            COLOR=5763719
+          else
+            REF=$(jq -r '.ref // empty' ctx.json)
+            BRANCH=${REF#refs/heads/}
+            SHORT_NAME=$(jq -r '.repository.name // empty' ctx.json)
+            COUNT=$(jq '.event.commits | length' ctx.json)
+            URL=$(jq -r '.event.compare // empty' ctx.json)
+            TITLE="New push to $SHORT_NAME ($BRANCH)"
+            if [ "$COUNT" != "0" ]; then
+              DESC=$(jq -r '[.event.commits[] | ("- `" + .id[0:7] + "` " + (.message | split("\n")[0]) + " by " + .author.username)] | join("\n")' ctx.json)
+            else
+              DESC="Manual or non-commit push event."
+            fi
+            COLOR=5793266
+          fi
+
+          DESCFIRST=$(printf '%s' "$DESC" | cut -c1-3800)
+
+          JSON=$(jq -n \
+            --arg username "GitHub Notifier" \
+            --arg title "$TITLE" \
+            --argjson color "$COLOR" \
+            --arg desc "$DESCFIRST" \
+            --arg url "$URL" \
+            '{username:$username, embeds:[{title:$title, color:$color, description:$desc, url:$url}]}')
+
+          curl -sS -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" -d "$JSON" -o /dev/null -w "%{http_code}\n"
